@@ -1,0 +1,821 @@
+---
+title: "Human Macrophages: atb version of M-CSF v GM-CSF: LPS, LPS+Adenosine, LPS+PGE2"
+author: "Kajal Hamidzadeh and atb"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    number_sections: true
+    self_contained: true
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  rmdformats::readthedown:
+    code_download: true
+    code_folding: show
+    df_print: paged
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    width: 300
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+  BiocStyle::html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+---
+
+<style type="text/css">
+body, td {
+  font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+ font-size: 16px
+}
+</style>
+
+```{r options, include=FALSE}
+library("hpgltools")
+tt <- devtools::load_all("/data/hpgltools")
+knitr::opts_knit$set(width=120,
+                     progress=TRUE,
+                     verbose=TRUE,
+                     echo=TRUE)
+knitr::opts_chunk$set(error=TRUE,
+                      dpi=96)
+old_options <- options(digits=4,
+                       stringsAsFactors=FALSE,
+                       knitr.duplicate.label="allow")
+ggplot2::theme_set(ggplot2::theme_bw(base_size=10))
+rundate <- format(Sys.Date(), format="%Y%m%d")
+previous_file <- ""
+ver <- "20200330"
+
+##tmp <- sm(loadme(filename=paste0(gsub(pattern="\\.Rmd", replace="", x=previous_file), "-v", ver, ".rda.xz")))
+##rmd_file <- "03_expression_infection_20180822.Rmd"
+```
+
+In this version of the worksheet, I am hoping to perform basically the same
+analyses, but do it in a fashion which is more in my own style.
+
+# Annotation data
+
+Collect the human annotation data using biomaRt.
+
+```{r annotation}
+gene_info <- load_biomart_annotations(host="useast.ensembl.org")$annotation
+rownames(gene_info) <- make.names(gene_info[["ensembl_gene_id"]], unique=TRUE)
+tx_gene_map <- gene_info[, c("ensembl_transcript_id", "ensembl_gene_id")]
+```
+
+# Experimental design
+
+I am going to use Kajal's sample sheet without modification.
+
+```{r expt_design}
+design <- read.table("sample_sheets/MetaData only 4 hour.txt", header=TRUE, sep='\t')
+design[["Patient"]] <- as.factor(design[["Patient"]])
+design[["Stimulation"]] <- as.factor(design[["Stimulation"]])
+design[["Batch"]] <- as.factor(design[["Batch"]])
+design[["Growth"]] <- as.factor(design[["Growth"]])
+files <- file.path("kallisto abundance files/", design$HPGL.Identifier, "abundance.tsv")
+names(files) <- paste0("HPGL09", c(12:31, 42:60))
+rownames(design) <- design[[1]]
+design[["condition"]] <- design[["Stimulation"]]
+design[["file"]] <- glue::glue("preprocessing/{rownames(design)}/abundance.tsv")
+colnames(design) <- tolower(colnames(design))
+design[["gp"]] <- as.factor(glue("{design[['growth']]}_{design[['stimulation']]}"))
+
+## Set up a column called stim_pred which is a predicate of stimulated vs. unstimulated samples.
+design[["stim_pred"]] <- "stimulated"
+ns_idx <- design[["stimulation"]] == "NS"
+design[ns_idx, "stim_pred"] <- "unstimulated"
+```
+
+# Create expressionset
+
+We have some annotation data and experimental metadata.
+
+```{r create_expt}
+hs_expt <- create_expt(metadata=design, gene_info=gene_info, tx_gene_map=tx_gene_map)
+hs_expt <- set_expt_batches(hs_expt, fact="growth")
+stim_expt <- subset_expt(hs_expt, subset="stimulation!='NS'")
+```
+
+# Write out the expressionset data
+
+We can write out the data to an excel file in the hopes that it will prove useful.
+
+```{r write_expt, fig.show="hide"}
+written <- write_expt(hs_expt, batch="raw",
+                      excel=glue::glue("excel/hs_expt-v{ver}.xlsx"))
+```
+
+There is an important caveat, this is not taking into account the patient effects.
+
+## Show some written plots
+
+```{r write_plots}
+written$legend_plot
+written$raw_libsize
+written$raw_density
+written$raw_boxplot
+written$norm_nonzero
+written$norm_corheat
+written$norm_disheat
+written$norm_pca
+```
+
+# Consider different models for the data
+
+We may wish to lower the variance from the patients and/or the GM/M effects.
+
+## Current state with sva
+
+```{r current_sva}
+hs_batch <- normalize_expt(hs_expt, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="svaseq")
+plot_pca(hs_batch)$plot
+```
+
+## Current state with residual-based batch adjustment
+
+Because we are explicitly removing the effect of GM/M, the patient effect really
+becomes apparent.
+
+```{r current_limma}
+hs_batch <- normalize_expt(hs_expt, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="limmaresid")
+plot_pca(hs_batch)$plot
+```
+
+## Set batch to patient and repeat sva
+
+The picture with sva should be the same as the first plot, just with 6 shapes
+instead of two.
+
+```{r patient_sva}
+hs_pat <- set_expt_batches(hs_expt, fact="patient")
+hs_batch <- normalize_expt(hs_pat, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="svaseq")
+plot_pca(hs_batch)$plot
+```
+
+## Patient batch and limma
+
+This picture should be different, and should show us the M/GM effect as opposed
+to the patient effect.
+
+```{r patient_limma}
+hs_batch <- normalize_expt(hs_pat, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="limmaresid")
+plot_pca(hs_batch)$plot
+```
+
+## Combine growth and stimulation and repeat sva
+
+I am not sure what this will look like.  Since two aspects of the data are in
+the condition portion of the model matrix, I think it should look different.
+When I created the design matrix, I made a column for this purpose; I called it
+'gp', but honestly I don't remember why...
+
+```{r gs_sva}
+hs_gs <- set_expt_conditions(hs_pat, fact="gp")
+hs_batch <- normalize_expt(hs_gs, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="svaseq")
+plot_pca(hs_batch)$plot
+```
+
+It seems to me that is primarily showing us differences between M/GM.
+
+What about limma?
+
+```{r gs_limma}
+hs_batch <- normalize_expt(hs_gs, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="limma")
+plot_pca(hs_batch)$plot
+```
+
+Same deal, just more.  This might be the moment to reconsider the fact that
+Kajal's work focused only on the M/GM samples and AFAICT ignored the
+non-stimulated samples.
+
+```{r test}
+tmp <- subset_expt(hs_gs, subset='stimulation!="NS"')
+hs_batch <- normalize_expt(tmp, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="sva")
+plot_pca(hs_batch)$plot
+
+tmp <- subset_expt(hs_gs, subset='stimulation!="NS"')
+hs_ruv <- normalize_expt(tmp, transform="log2", convert="cpm",
+                         norm="quant", filter=TRUE, batch="ruv_empirical")
+plot_pca(hs_ruv)$plot
+
+hs_limma <- normalize_expt(tmp, transform="log2", convert="cpm",
+                           norm="quant", filter=TRUE, batch="limmaresid")
+plot_pca(hs_limma)$plot
+```
+
+### My Figure 3A, sva
+
+Here are a few versions of what figure 3a might look like in my world.
+
+```{r fig3asva1}
+plot_pca(hs_batch, plot_labels=FALSE)$plot
+plot_pca(hs_ruv, plot_labels=FALSE)$plot
+plot_pca(hs_limma, plot_labels=FALSE)$plot
+```
+
+Interesting, I did not put them all into the test block above, but I tried out a
+bunch of small changes to the model and adjusters.  I think I learned one
+primary lesson: patient number 3 is a bit weird.  I think I might suggest
+removing this person from the data.
+
+The next lesson I learned is that LPS is way different than LA/LP, something
+which I kind of knew from other work, but worth remembering.
+
+# Differential expression
+
+There are a few ways to consider differential expression for this data.  In all
+cases I think it is safe to assume that we wish to use patient as the batch
+factor/surrogate variable.
+
+With that in mind, here are the factors of the data to which we have usable
+variance/experimental design:
+
+1.  Stimulated vs. Unstimulated:  This I think has the most variance in the
+    data, even including patient.  We can access this by putting stimulation
+    state (yes/no) in the model and just running sva against everything else, or by
+    having a model like  "~ stimulation_binary + patient + growth"
+2.  Stimulation types:  If we want to consider all LPS vs. all LP etc... we can
+    do that in a similar fashion, by either putting stimulation state
+    (LPS/LP/etc) in the model and just running sva.  Conversely we could do
+    "~ stimulation_state + patient + growth" in the model.
+3.  Growth condition:  Ibid, except "~ growth + patient + stimulation"
+4.  Growth+Stimulation:  This is the focus of Kajal's worksheet I think and may
+    be repeated with "~ gp + patient"
+
+Before I run these, lets look at the variance in the data and make sure I am not
+full of crap.
+
+```{r varpart}
+hs_vpin <- normalize_expt(hs_expt, convert="cpm", filter=TRUE)
+hs_varpart <- simple_varpart(hs_vpin, factors=c("stimulation", "growth", "patient"),
+                             chosen_factor="patient", do_fit=TRUE)
+hs_varpart$partition_plot
+top_40_stimulation <- hs_varpart$percent_plot
+## Now show a variance boxplot for the chosen batch factor (patient)
+hs_varpart$stratify_batch_plot
+hs_varpart$stratify_condition_plot
+
+percent_growth <- replot_varpart_percent(hs_varpart, column="growth")
+percent_growth$plot
+
+percent_patient <- replot_varpart_percent(hs_varpart, column="patient")
+percent_patient$plot
+
+percent_unknown <- replot_varpart_percent(hs_varpart, column="Residuals")
+percent_unknown$plot
+```
+## Perform some DE
+
+### Patient as batch, growth and stimulation as condition, sva
+
+```{r de_patbatch_gscond_batch, fig.show="hide"}
+hs_filt <- normalize_expt(hs_expt, filter=TRUE)
+pat_gs_sva <- set_expt_conditions(hs_filt, fact="gp")
+pat_gs_sva <- set_expt_batches(pat_gs_sva, fact="patient")
+pat_gs_sva_de <- all_pairwise(pat_gs_sva, model_batch="sva")
+
+keepers <- list(
+    ## GM against unstimulated
+    "GM_LPS_vs_GM_NS" = c("GM_LPS", "GM_NS"),
+    "GM_LP_vs_GM_NS" = c("GM_LP", "GM_NS"),
+    "GM_LA_vs_GM_NS" = c("GM_LA", "GM_NS"),
+    ## M against unstimulated
+    "M_LPS_vs_M_NS" = c("M_LPS", "M_NS"),
+    "M_LP_vs_M_NS" = c("M_LP", "M_NS"),
+    "M_LA_vs_M_NS" = c("M_LA", "M_NS"),
+    ## GM against LPS
+    "GM_LP_vs_GM_LPS" = c("GM_LP", "GM_LPS"),
+    "GM_LA_vs_GM_LPS" = c("GM_LA", "GM_LPS"),
+    ## M against LPS
+    "M_LP_vs_M_LPS" = c("M_LP", "M_LPS"),
+    "M_LA_vs_M_LPS" = c("M_LA", "M_LPS"),
+    ## GM, LA vs LP
+    "GM_LP_vs_GM_LA" = c("GM_LP", "GM_LA"),
+    ## M, LA vs LP
+    "M_LP_vs_M_LA" = c("M_LP", "M_LA"),
+    ## Last, each M vs GM
+    "GM_NS_vs_M_NS" = c("GM_NS", "M_NS"),
+    "GM_LPS_vs_M_LPS" = c("GM_LPS", "M_LPS"),
+    "GM_LP_vs_M_LP" = c("GM_LP", "M_LP"),
+    "GM_LA_vs_M_LA" = c("GM_LA", "M_LA"))
+pat_gs_sva_tables <- combine_de_tables(
+    pat_gs_sva_de, keepers=keepers,
+    excel=glue::glue("excel/pat_gs_sva_tables-v{ver}.xlsx"))
+pat_gs_sva_sig <- extract_significant_genes(
+    pat_gs_sva_tables,
+    excel=glue::glue("excel/pat_gs_sva_sig-v{ver}.xlsx"))
+```
+
+### Patient as batch, growth and stimulation as condition, batch in model.
+
+```{r de_patbatch_gscond_sva, fig.show="hide"}
+pat_gs_batch <- set_expt_conditions(hs_filt, fact="gp")
+pat_gs_batch <- set_expt_batches(pat_gs_batch, fact="patient")
+pat_gs_batch_de <- all_pairwise(pat_gs_batch, model_batch=TRUE)
+
+pat_gs_batch_tables <- combine_de_tables(
+    pat_gs_batch_de, keepers=keepers,
+    excel=glue::glue("excel/pat_gs_batch_tables-v{ver}.xlsx"))
+pat_gs_batch_sig <- extract_significant_genes(
+    pat_gs_batch_tables,
+    excel=glue::glue("excel/pat_gs_batch_sig-v{ver}.xlsx"))
+
+
+```
+
+## Compare sva/batch in model
+
+```{r compare_de}
+comp <- compare_de_results(pat_gs_sva_tables, pat_gs_batch_tables)
+## Look at the logFC comparisons:
+comp$lfc_heat
+## Look at the p-value comparisons:
+comp$p_heat
+## It appears edgeR is a bit more sensitive to changes in the model.
+```
+
+# Perform some ontology searches
+
+It appears that I crashed the gProfiler web server by sending in my various
+searches.  So I will leave these off for the moment and replace them with some
+clusterProfiler searches.
+
+## GM Comparisons
+
+### GM LPS vs GM NS
+
+```{r}
+table <- "GM_LPS_vs_GM_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gprofiler1, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp1}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+### GM LP vs GM NS
+
+```{r}
+table <- "GM_LP_vs_GM_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gp2, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp2}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+### GM LA vs GM NS
+
+```{r}
+table <- "GM_LA_vs_GM_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gp3, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp3}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+## GM Comparisons against LPS
+
+### GM LP vs GM LPS
+
+```{r}
+table <- "GM_LP_vs_GM_LPS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+
+```{r gp4, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp4}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+### GM LA vs GM LPS
+
+```{r}
+table <- "GM_LA_vs_GM_LPS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gp5, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+## No hits!
+```
+
+### GM LA vs GM LP
+
+This does not get any useful results.
+
+```{r, eval=FALSE}
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][["GM_LP_vs_GM_LA"]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][["GM_LP_vs_GM_LA"]]
+
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+## Down only had 2 genes.
+```
+
+```{r cp5}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+## M Comparisons
+
+### M LPS vs M NS
+
+This search crashed the gProfiler server, so I will stop it at least for the moment.
+
+```{r}
+table <- "M_LPS_vs_M_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gp6, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp6}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+### M LP vs M NS
+
+```{r}
+table <- "M_LP_vs_M_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gp7, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp7}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+## No significant hits going down
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+### M LA vs M NS
+
+```{r}
+table <- "M_LA_vs_M_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r gp8, eval=FALSE}
+ont_up <- simple_gprofiler(up)
+ont_up[["pvalue_plots"]][["mfp_plot_over"]]
+ont_up[["pvalue_plots"]][["bpp_plot_over"]]
+ont_up[["pvalue_plots"]][["kegg_plot_over"]]
+ont_up[["pvalue_plots"]][["reactome_plot_over"]]
+ont_up[["pvalue_plots"]][["hp_plot_over"]]
+
+ont_down <- simple_gprofiler(down)
+ont_down[["pvalue_plots"]][["mfp_plot_over"]]
+ont_down[["pvalue_plots"]][["bpp_plot_over"]]
+ont_down[["pvalue_plots"]][["kegg_plot_over"]]
+ont_down[["pvalue_plots"]][["reactome_plot_over"]]
+ont_down[["pvalue_plots"]][["hp_plot_over"]]
+```
+
+```{r cp8}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+## M vs GM
+
+```{r}
+table <- "GM_NS_vs_M_NS"
+up <- pat_gs_sva_sig[["deseq"]][["ups"]][[table]]
+down <- pat_gs_sva_sig[["deseq"]][["downs"]][[table]]
+de <- pat_gs_sva_tables[["data"]][[table]]
+```
+
+```{r cp9}
+ont_up <- simple_clusterprofiler(sig_genes=up, de_table=de,
+                                 do_david=TRUE, david_user="abelew@umd.edu",
+                                 fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_up$plots$ego_sig_mf
+ont_up$plots$ego_sig_bp
+ont_up$plots$dot_sig_mf
+ont_up$plots$dot_sig_bp
+ont_up$plots$map_sig_mf
+ont_up$plots$map_sig_bp
+
+ont_down <- simple_clusterprofiler(sig_genes=down, de_table=de,
+                                   do_david=TRUE, david_user="abelew@umd.edu",
+                                   fc_column="deseq_logfc", orgdb="org.Hs.eg.db")
+ont_down$plots$ego_all_mf
+ont_down$plots$ego_all_bp
+ont_down$plots$dot_all_mf
+ont_down$plots$dot_all_bp
+ont_down$plots$map_all_mf
+ont_down$plots$map_all_bp
+```
+
+
+
+
+```{r saveme, eval=FALSE}
+pander::pander(sessionInfo())
+message(paste0("This is hpgltools commit: ", get_git_commit()))
+this_save <- paste0(gsub(pattern="\\.Rmd", replace="", x=rmd_file), "-v", ver, ".rda.xz")
+message(paste0("Saving to ", this_save))
+tmp <- sm(saveme(filename=this_save))
+```
+
+
+```{r loadme, eval=FALSE}
+loadme(filename=this_save)
+```

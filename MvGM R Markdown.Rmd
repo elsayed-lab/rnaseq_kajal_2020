@@ -1,0 +1,1007 @@
+---
+title: "Human Macrophages: M-CSF v GM-CSF: LPS, LPS+Adenosine, LPS+PGE2"
+author: "Kajal Hamidzadeh"
+date: "July 11, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r warning=FALSE, message=FALSE}
+library(devtools)
+library(tximport)
+library(biomaRt)
+library(hpgltools)
+library(DESeq2)
+library(gplots)
+library(cbcbSEQ)
+library(RColorBrewer)
+library(Vennerable)
+library(edgeR)
+library(calibrate)
+library(scales)
+```
+
+## Set working directory, import metadata and abundance files
+
+```{r read_data}
+design <- read.table('MetaData only 4 hour.txt', header=T, sep='\t')
+files <- file.path("kallisto abundance files/", design$HPGL.Identifier, "abundance.tsv")
+names(files) <- paste0("HPGL09", c(12:31, 42:60))
+```
+
+## Convert transcript ID to gene ID
+
+```{r ensembl}
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+tx2gene <- getBM(attributes=c("ensembl_transcript_id", "ensembl_gene_id", "chromosome_name"), mart=ensembl)
+good_idx <- grepl(x=tx2gene[["chromosome_name"]], pattern="^[[:alnum:]]{1,2}$")
+good_ones <- tx2gene[good_idx, -3]
+```
+
+## Create counts table
+
+```{r}
+txi.kallisto.tsv <- tximport(files, type="kallisto", tx2gene=good_ones, countsFromAbundance="lengthScaledTPM")
+nrow(txi.kallisto.tsv$counts)
+
+write.table(txi.kallisto.tsv$counts, "TPM_MvGM_CDS_20180711.txt", col.names=T, row.names=F, quote=F)
+write.csv(txi.kallisto.tsv$counts, "TPM_MvGM_20180711.csv", row.names=T, quote=F)
+```
+
+## Create DESeqDataSet
+
+Not sure what this is actually doing
+
+```{r deseq_dds}
+df <- data.frame(condition=paste(design$HPGL.Identifier, design$Growth, design$Stimulation, design$Patient, sep="_"))
+rownames(df)=colnames(txi.kallisto.tsv$counts)
+dds <- DESeqDataSetFromTximport(txi.kallisto.tsv, df, ~condition)
+nrow(dds)
+```
+
+## Bar Plot of Counts
+
+```{r barplot}
+par(mar=c(10, 4.5, 3.5, 1))
+par(oma=c(0, 0, 0, 0))
+barplot(colSums(txi.kallisto.tsv$counts), las=3, main='Raw Counts By Sample')
+```
+
+## Box Plot of Counts
+
+```{r count_barplot}
+dds <- estimateSizeFactors(dds)
+ncts <- counts(dds, normalized=TRUE)
+y <- log(ncts + 1)
+
+par(mar=c(5, 5, 2, 1))
+par(oma=c(0, 0, 0, 0))
+boxplot(y, names=colnames(txi.kallisto.tsv$counts), las=3, main='Per Sample Log of Size-factor Counts')
+```
+
+## Heatmap of Pearson Correlation
+
+```{r corheat}
+datCor <- cor(txi.kallisto.tsv$counts)
+heatmap.2(datCor, Rowv=NA, Colv=NA,
+          margins=c(10, 10),
+          labRow=df$condition,
+          labCol=df$condition,
+          dendrogram="none",
+          scale="none",
+          trace="none",
+          srtCol=45, main='Pearson Correlation')
+```
+
+## Median Pairwise Correlation
+
+```{r smc}
+corM <- matrixStats::rowMedians(cor(txi.kallisto.tsv$counts))
+qs <- quantile(corM, p=c(1, 3)/4)
+iqr <- diff(qs)
+outLimit <- qs[1] - 1.5 * iqr
+ylim <- c(pmin(min(corM), outLimit), max(corM))
+cond <- paste(design$Growth, design$Stimulation, sep="_")
+col <- ifelse(cond=="M_NS", "gray60",
+              ifelse(cond=="M_LPS", "deeppink3",
+                     ifelse(cond=="M_LA", "darkseagreen2",
+                            ifelse(cond=="M_LP", "lavender",
+                                   ifelse(cond=="GM_NS", "lightpink1",
+                                          ifelse(cond=="GM_LPS", "moccasin",
+                                                 ifelse(cond=="GM_LA", "black",
+                                                        ifelse(cond=="GM_LP", "springgreen4",
+                                                               "blue2"))))))))
+par(mar=c(5, 4.5, 2, 1))
+plot(corM, xaxt="n", ylim=ylim, ylab="Median Pairwise Correlation", xlab="", main="", col=col, pch=16, cex=1.5)
+axis(side=1, at=seq(along=corM), labels=colnames(txi.kallisto.tsv$counts), las=2)
+abline(h=outLimit, lty=2)
+abline(v=1:ncol(txi.kallisto.tsv$counts), lty=3, col="black")
+```
+
+## Filter and Normalize Counts
+
+```{r}
+filterCounts = function (counts, lib.size = NULL, thresh = 1, minSamples = 2) {
+  cpms <- 2^log2CPM(counts, lib.size = lib.size)$y
+  keep <- rowSums(cpms > thresh) >= minSamples
+  counts <- counts[keep, ]
+  counts
+}
+x <- table(design$Stimulation)
+dim(txi.kallisto.tsv$counts)
+
+counts <- filterCounts(txi.kallisto.tsv$counts, thresh=1, minSamples=min(x))
+dim(counts)
+
+countsSubQ <- qNorm(counts)
+x <- log2CPM(countsSubQ)
+s <- makeSVD(x$y)
+```
+
+## PCA
+
+```{r}
+pcRes(s$v, s$d, cond, design$Batch)[1:5, ]
+
+pcRes(s$v, s$d, cond, design$Patient)[1:5, ]
+```
+
+## Plot PC1 v PC2
+
+```{r original_pca}
+condnum <- as.numeric(design$Stimulation)
+condnum <- ifelse(condnum==4, "green",
+                  ifelse(condnum==3, "lightblue",
+                         ifelse(condnum==2, "pink",
+                                ifelse(condnum==1, "purple", "black"))))
+patnum <- as.numeric(design$Patient)
+patnum <- ifelse(patnum==4, 21,
+                 ifelse(patnum==3, 22,
+                        ifelse(patnum==2, 23,
+                               ifelse(patnum==1, 24,
+                                      ifelse(patnum==5, 25, 1)))))
+plotPC(s$v, s$d, col="black", pch=patnum, bg=condnum)
+
+legend(x=0.2, y=0.2, legend=unique(design$Stimulation), pch=22, col=0,
+       pt.bg=c("green","lightblue","pink","purple"), pt.cex=1.5, cex=0.5, bty="n")
+legend(x=0.2, y=-0.1, legend=unique(design$Patient), pch=unique(patnum), col=0,
+       pt.bg="gray90", pt.cex=1.5, cex=0.5, bty="n")
+```
+
+```{r my_pca}
+my_design <- design
+rownames(my_design) <- my_design[[1]]
+colnames(my_design) <- tolower(colnames(my_design))
+my_design[["condition"]] <- my_design[["stimulation"]]
+my_design[["batch"]] <- my_design[["patient"]]
+data <- x[["y"]]
+
+another <- plot_pca(data=data, design=my_design)
+```
+
+## Euclidian Distance Heat Map
+
+```{r disheat}
+dists <- dist(t(counts))
+mat <- as.matrix(dists)
+rownames(mat) <- colnames(mat) <- cond
+hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+vec.patient <- rainbow(nlevels(design$Patient), start=0, end=.8)
+patient.color <- rep(0, length(design$Patient))
+for (i in 1:length(design$Patient))
+  patient.color[i] <- vec.patient[design$Patient[i]==levels(design$Patient)]
+vec.condition <- c("green", "lightblue", "pink", "purple")
+condition.color <- rep(0, length(design$Stimulation))
+for (i in 1:length(design$Stimulation))
+  condition.color[i] <- vec.condition[design$Stimulation[i]==levels(design$Stimulation)]
+
+heatmap <- heatmap.2(mat, trace="none", col = rev(hmcol), margin=c(11, 11), ColSideColors=condition.color,
+                     RowSideColors=patient.color, key="FALSE", srtCol=45)
+```
+
+## Correct for Patient in Limma model
+
+```{r}
+mod <- model.matrix(~design$Patient)
+v <- voom(countsSubQ, mod)
+fit <- lmFit(v)
+newData <- residuals(fit, v)
+s <- makeSVD(newData)
+
+pcRes(s$v, s$d, cond, design$Batch)[1:5, ]
+pcRes(s$v, s$d, cond, design$Patient)[1:5, ]
+```
+
+## Plot PC1 and PC2 with patient correction
+
+```{r}
+gronum <- as.numeric(design$Growth)
+gronum <- ifelse(gronum==2, 19,
+                 ifelse(gronum==1, 15, 1))
+patnum <- as.numeric(design$Patient)
+patnum <- ifelse(patnum==1, "pink",
+                ifelse(patnum==2, "green",
+                        ifelse(patnum==3, "blue",
+                              ifelse(patnum==4, "yellow",
+                                      ifelse(patnum==5, "black", "orange")))))
+samplenum <- as.numeric(design$Stimulation)
+samplenum <- ifelse(samplenum==4, "green",
+                ifelse(samplenum==3, "blue",
+                        ifelse(samplenum==1, "black",
+                              ifelse(samplenum==2, "yellow", "grey"))))
+plotPC(s$v, s$d, pch=gronum, col=samplenum, cex=2)
+
+legend(x=0.05, y=0.3, legend=c("NS", "LPS", "LP", "LA"), pch=22, col=0,
+       pt.bg=c("green", "blue", "black", "yellow"), pt.cex=1.5, cex=1, bty="n")
+legend(x=0.05, y=0.1, legend=unique(design$Growth), pch=unique(gronum), col="black",
+       pt.bg="black", pt.cex=1.0, cex=1, bty="n")
+```
+
+```{r my_pca2}
+another_v2 <- plot_pca(data=newData, design=my_design)
+another_v2$plot
+```
+
+
+## Heatmap with patient correction??
+
+```{r}
+dists <- dist(t(newData))
+mat <- as.matrix(dists)
+rownames(mat) <- colnames(mat) <- cond
+heatmap <- heatmap.2(mat, trace="none", col = rev(hmcol), margin=c(11, 11), ColSideColors=condition.color,
+                     RowSideColors=patient.color, key="FALSE", srtCol=45)
+```
+
+## DE analysis
+
+```{r}
+countsSubQ <- qNorm(counts)
+patient <- design$Patient
+mod <- model.matrix(~0+cond+patient, data=design)
+voom(countsSubQ, mod, plot=TRUE)
+
+v <- voom(countsSubQ, mod)
+fit <- lmFit(v)
+```
+
+## M_LPS v M_NS
+
+eBayes finds an F-statistic from the set of t-statistics for that gene
+
+```{r}
+M_LPS.M_NS.contr.mat <- makeContrasts(M_LPSvM_NS=(condM_LPS-condM_NS), levels=v$design)
+M_LPS.M_NS.fit <- contrasts.fit(fit, M_LPS.M_NS.contr.mat)
+M_LPS.M_NS.eb <- eBayes(M_LPS.M_NS.fit)
+M_LPS.M_NS.topTab <- topTable(M_LPS.M_NS.eb, coef="M_LPSvM_NS", number=nrow(v$E))
+M_LPS.M_NS.topTab <- cbind(rownames(M_LPS.M_NS.topTab), M_LPS.M_NS.topTab)
+colnames(M_LPS.M_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LPS.M_NS.topTab) <- c(1:nrow(M_LPS.M_NS.topTab))
+
+write.csv(M_LPS.M_NS.topTab, file="topTab_M_LPSvM_NS_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+```
+
+Limit list to genes with an adjusted p value < 0.05
+
+```{r}
+M_LPS.M_NS.sigGenes <- M_LPS.M_NS.topTab[M_LPS.M_NS.topTab$adj.P.Val <0.05, ]
+length(M_LPS.M_NS.sigGenes$ID)
+```
+
+Filter out rows with less than 2-fold change (log2 fold change of > 1)
+
+```{r}
+M_LPS.M_NS.sigGenesFold1 <- subset(M_LPS.M_NS.sigGenes, abs(logFC) > 1)
+length(M_LPS.M_NS.sigGenesFold1$ID)
+```
+
+33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M33;33M35;17M35;17M35;17M35;17M35;17M35;17MFilter out rows with less than 4-fold change (log2 fold change of > 2)
+
+```{r}
+M_LPS.M_NS.sigGenesFold2 <- subset(M_LPS.M_NS.sigGenes, abs(logFC) > 2)
+length(M_LPS.M_NS.sigGenesFold2$ID)
+```
+
+Make an MA plot
+
+```{r}
+sel <- M_LPS.M_NS.topTab$adj.P.Val < 0.05
+top <- M_LPS.M_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPSvM_NS adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+```
+
+Annotate sigGenes list using Biomart
+
+```{r}
+M_LPS.M_NS.sigGenes <- M_LPS.M_NS.sigGenes[order(-M_LPS.M_NS.sigGenes$logFC), ]
+
+sigGenes <- M_LPS.M_NS.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id", values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG_LPS <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG_LPS <- subset(DEG_LPS, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG_LPS <- DEG_LPS[order(-DEG_LPS$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG_LPS <- subset(DEG_LPS, abs(DEG_LPS$logFC)>1)
+
+##Save DE genes
+write.table(DEG_LPS, "DEG_M_LPSvM_NS_CDS_limmabatchcorrection_20171120.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG_LPS, "DEG_M_LPSvM_NS_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+```
+
+## M_LPS v M_LA
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LPS.M_LA.contr.mat <- makeContrasts(M_LPSvM_LA=((condM_LA-condM_NS)-(condM_LPS-condM_NS)), levels=v$design)
+M_LPS.M_LA.fit <- contrasts.fit(fit, M_LPS.M_LA.contr.mat)
+M_LPS.M_LA.eb <- eBayes(M_LPS.M_LA.fit)
+M_LPS.M_LA.topTab <- topTable(M_LPS.M_LA.eb, coef="M_LPSvM_LA", number=nrow(v$E))
+M_LPS.M_LA.topTab <- cbind(rownames(M_LPS.M_LA.topTab), M_LPS.M_LA.topTab)
+colnames(M_LPS.M_LA.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LPS.M_LA.topTab) <- c(1:nrow(M_LPS.M_LA.topTab))
+
+write.csv(M_LPS.M_LA.topTab, file="topTab_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.csv", row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LPS.M_LA.sigGenes <- M_LPS.M_LA.topTab[M_LPS.M_LA.topTab$adj.P.Val <0.05, ]
+length(M_LPS.M_LA.sigGenes$ID)
+##[1] 617
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LPS.M_LA.sigGenesFold1 <- subset(M_LPS.M_LA.sigGenes, abs(logFC) > 1)
+length(M_LPS.M_LA.sigGenesFold1$ID)
+##[1] 240
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LPS.M_LA.sigGenesFold2 <- subset(M_LPS.M_LA.sigGenes, abs(logFC) > 2)
+length(M_LPS.M_LA.sigGenesFold2$ID)
+##[1] 69
+
+##Make an MA plot
+sel <- M_LPS.M_LA.topTab$adj.P.Val < 0.05
+top <- M_LPS.M_LA.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPSvM_LA adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.png", width=700,
+         height=700)
+dev.off()
+
+M_LPS.M_LA.sigGenes <- M_LPS.M_LA.sigGenes[order(-M_LPS.M_LA.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LPS.M_LA.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC)>1)
+
+##Save DE genes
+write.table(DEG, "DEG_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG, "DEG_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.csv", row.names=F, quote=F)
+```
+
+## M_LPS v M_LP
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LPS.M_LP.contr.mat <- makeContrasts(M_LPSvM_LP=((condM_LP-condM_NS)-(condM_LPS-condM_NS)), levels=v$design)
+M_LPS.M_LP.fit <- contrasts.fit(fit, M_LPS.M_LP.contr.mat)
+M_LPS.M_LP.eb <- eBayes(M_LPS.M_LP.fit)
+M_LPS.M_LP.topTab <- topTable(M_LPS.M_LP.eb, coef="M_LPSvM_LP", number=nrow(v$E))
+M_LPS.M_LP.topTab <- cbind(rownames(M_LPS.M_LP.topTab), M_LPS.M_LP.topTab)
+colnames(M_LPS.M_LP.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LPS.M_LP.topTab) <- c(1:nrow(M_LPS.M_LP.topTab))
+
+write.csv(M_LPS.M_LP.topTab, file="topTab_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv",
+          row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LPS.M_LP.sigGenes <- M_LPS.M_LP.topTab[M_LPS.M_LP.topTab$adj.P.Val <0.05, ]
+length(M_LPS.M_LP.sigGenes$ID)
+##[1] 1473
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LPS.M_LP.sigGenesFold1 <- subset(M_LPS.M_LP.sigGenes, abs(logFC) > 1)
+length(M_LPS.M_LP.sigGenesFold1$ID)
+##[1] 467
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LPS.M_LP.sigGenesFold2 <- subset(M_LPS.M_LP.sigGenes, abs(logFC) > 2)
+length(M_LPS.M_LP.sigGenesFold2$ID)
+##[1] 125
+
+##Make an MA plot
+sel <- M_LPS.M_LP.topTab$adj.P.Val < 0.05
+top <- M_LPS.M_LP.topTab
+sub <- paste("No. of sig. genes: ", sum(sel),"/",length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPSvM_LP adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.png", width=700,
+         height=700)
+dev.off()
+
+M_LPS.M_LP.sigGenes <- M_LPS.M_LP.sigGenes[order(-M_LPS.M_LP.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LPS.M_LP.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC)>1)
+
+##Save DE genes
+write.table(DEG, "DEG_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG, "DEG_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv", row.names=F, quote=F)
+```
+
+## M_LP v M_NS
+
+```{r}
+##eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LP.M_NS.contr.mat <- makeContrasts(M_LPvM_NS=(condM_LP-condM_NS), levels=v$design)
+M_LP.M_NS.fit <- contrasts.fit(fit, M_LP.M_NS.contr.mat)
+M_LP.M_NS.eb <- eBayes(M_LP.M_NS.fit)
+M_LP.M_NS.topTab <- topTable(M_LP.M_NS.eb, coef="M_LPvM_NS", number=nrow(v$E))
+M_LP.M_NS.topTab <- cbind(rownames(M_LP.M_NS.topTab), M_LP.M_NS.topTab)
+colnames(M_LP.M_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LP.M_NS.topTab) <- c(1:nrow(M_LP.M_NS.topTab))
+
+write.csv(M_LP.M_NS.topTab, file="topTab_M_LPvM_NS_CDS_limmabatchcorrection_20171018.csv", row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LP.M_NS.sigGenes <- M_LP.M_NS.topTab[M_LP.M_NS.topTab$adj.P.Val <0.05, ]
+length(M_LP.M_NS.sigGenes$ID)
+##[1] 4386
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LP.M_NS.sigGenesFold1 <- subset(M_LP.M_NS.sigGenes, abs(logFC) > 1)
+length(M_LP.M_NS.sigGenesFold1$ID)
+##[1] 1455
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LP.M_NS.sigGenesFold2 <- subset(M_LP.M_NS.sigGenes, abs(logFC) > 2)
+length(M_LP.M_NS.sigGenesFold2$ID)
+##[1] 519
+
+##Make an MA plot
+sel <- M_LP.M_NS.topTab$adj.P.Val < 0.05
+top <- M_LP.M_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPvM_NS adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID,])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_M_LPvM_NS_CDS_limmabatchcorrection_20171018.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_M_LPvM_NS_CDS_limmabatchcorrection_20171018.png", width=700, height=700)
+dev.off()
+
+M_LP.M_NS.sigGenes <- M_LP.M_NS.sigGenes[order(-M_LP.M_NS.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LP.M_NS.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG_LP4 <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG_LP4 <- subset(DEG_LP4, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG_LP4 <- DEG_LP4[order(-DEG_LP4$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG_LP4 <- subset(DEG_LP4, abs(DEG_LP4$logFC)>1)
+
+##Save DE genes
+write.table(DEG_LP4, "DEG_M_LPvM_NS_CDS_limmabatchcorrection_20171018.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG_LP4, "DEG_M_LPvM_NS_CDS_limmabatchcorrection_20171018.csv", row.names=F, quote=F)
+```
+
+## M_LA v M_NS
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LA.M_NS.contr.mat <- makeContrasts(M_LAvM_NS=(condM_LA-condM_NS), levels=v$design)
+M_LA.M_NS.fit <- contrasts.fit(fit, M_LA.M_NS.contr.mat)
+M_LA.M_NS.eb <- eBayes(M_LA.M_NS.fit)
+M_LA.M_NS.topTab <- topTable(M_LA.M_NS.eb, coef="M_LAvM_NS", number=nrow(v$E))
+M_LA.M_NS.topTab <- cbind(rownames(M_LA.M_NS.topTab), M_LA.M_NS.topTab)
+colnames(M_LA.M_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LA.M_NS.topTab) <- c(1:nrow(M_LA.M_NS.topTab))
+
+write.csv(M_LA.M_NS.topTab, file="topTab_M_LAvM_NS_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LA.M_NS.sigGenes <- M_LA.M_NS.topTab[M_LA.M_NS.topTab$adj.P.Val <0.05, ]
+length(M_LA.M_NS.sigGenes$ID)
+##[1] 617
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LA.M_NS.sigGenesFold1 <- subset(M_LA.M_NS.sigGenes, abs(logFC) > 1)
+length(M_LA.M_NS.sigGenesFold1$ID)
+##[1] 240
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LA.M_NS.sigGenesFold2 <- subset(M_LA.M_NS.sigGenes, abs(logFC) > 2)
+length(M_LA.M_NS.sigGenesFold2$ID)
+##[1] 69
+
+##Make an MA plot
+sel <- M_LA.M_NS.topTab$adj.P.Val < 0.05
+top <- M_LA.M_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LAvM_NS adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_M_LAvM_NS_CDS_limmabatchcorrection_20171120.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_M_LAvM_NS_CDS_limmabatchcorrection_20171120.png", width=700, height=700)
+dev.off()
+
+M_LA.M_NS.sigGenes <- M_LA.M_NS.sigGenes[order(-M_LA.M_NS.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LA.M_NS.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG_LA4 <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG_LA4 <- subset(DEG_LA4, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG_LA4 <- DEG_LA4[order(-DEG_LA4$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG_LA4 <- subset(DEG_LA4, abs(DEG_LA4$logFC)>1)
+
+##Save DE genes
+write.table(DEG_LA4, "DEG_M_LAvM_NS_CDS_limmabatchcorrection_20171120.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG_LA4, "DEG_M_LAvM_NS_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+```
+
+##GM_LPS v. GM_NS
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+GM_LPS.GM_NS.contr.mat <- makeContrasts(GM_LPSvGM_NS=(condGM_LPS-condGM_NS), levels=v$design)
+GM_LPS.GM_NS.fit <- contrasts.fit(fit, GM_LPS.GM_NS.contr.mat)
+GM_LPS.GM_NS.eb <- eBayes(GM_LPS.GM_NS.fit)
+GM_LPS.GM_NS.topTab <- topTable(GM_LPS.GM_NS.eb, coef="GM_LPSvGM_NS", number=nrow(v$E))
+GM_LPS.GM_NS.topTab <- cbind(rownames(GM_LPS.GM_NS.topTab), GM_LPS.GM_NS.topTab)
+colnames(GM_LPS.GM_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(GM_LPS.GM_NS.topTab) <- c(1:nrow(GM_LPS.GM_NS.topTab))
+
+write.csv(GM_LPS.GM_NS.topTab, file="topTab_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+GM_LPS.GM_NS.sigGenes <- GM_LPS.GM_NS.topTab[GM_LPS.GM_NS.topTab$adj.P.Val <0.05, ]
+length(GM_LPS.GM_NS.sigGenes$ID)
+##[1] 302
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+GM_LPS.GM_NS.sigGenesFold1 <- subset(GM_LPS.GM_NS.sigGenes, abs(logFC) > 1)
+length(GM_LPS.GM_NS.sigGenesFold1$ID)
+##[1] 197
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+GM_LPS.GM_NS.sigGenesFold2 <- subset(GM_LPS.GM_NS.sigGenes, abs(logFC) > 2)
+length(GM_LPS.GM_NS.sigGenesFold2$ID)
+##[1] 101
+
+##Make an MA plot
+sel <- GM_LPS.GM_NS.topTab$adj.P.Val < 0.05
+top <- GM_LPS.GM_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="GM_LPSvGM_NS adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.png", width=700, height=700)
+dev.off()
+
+GM_LPS.GM_NS.sigGenes <- GM_LPS.GM_NS.sigGenes[order(-GM_LPS.GM_NS.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- GM_LPS.GM_NS.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC)>1)
+
+##Save DE genes
+write.table(DEG, "DEG_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG, "DEG_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+```
+
+## GM_LPS v GM_LP
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+GM_LPS.GM_LP.contr.mat <- makeContrasts(GM_LPSvGM_LP=((condGM_LPS-condGM_NS)-(condGM_LP-condGM_NS)), levels=v$design)
+GM_LPS.GM_LP.fit <- contrasts.fit(fit, GM_LPS.GM_LP.contr.mat)
+GM_LPS.GM_LP.eb <- eBayes(GM_LPS.GM_LP.fit)
+GM_LPS.GM_LP.topTab <- topTable(GM_LPS.GM_LP.eb, coef="GM_LPSvGM_LP", number=nrow(v$E))
+GM_LPS.GM_LP.topTab <- cbind(rownames(GM_LPS.GM_LP.topTab), GM_LPS.GM_LP.topTab)
+colnames(GM_LPS.GM_LP.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(GM_LPS.GM_LP.topTab) <- c(1:nrow(GM_LPS.GM_LP.topTab))
+
+write.csv(GM_LPS.GM_LP.topTab, file="topTab_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171023.csv", row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+GM_LPS.GM_LP.sigGenes <- GM_LPS.GM_LP.topTab[GM_LPS.GM_LP.topTab$adj.P.Val <0.05, ]
+length(GM_LPS.GM_LP.sigGenes$ID)
+##[1] 194
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+GM_LPS.GM_LP.sigGenesFold1 <- subset(GM_LPS.GM_LP.sigGenes, abs(logFC) > 1)
+length(GM_LPS.GM_LP.sigGenesFold1$ID)
+##[1] 114
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+GM_LPS.GM_LP.sigGenesFold2 <- subset(GM_LPS.GM_LP.sigGenes, abs(logFC) > 2)
+length(GM_LPS.GM_LP.sigGenesFold2$ID)
+##[1] 27
+
+##Make an MA plot
+sel <- GM_LPS.GM_LP.topTab$adj.P.Val < 0.05
+top <- GM_LPS.GM_LP.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="GM_LPSvGM_LP adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.png", width=700,
+         height=700)
+dev.off()
+
+GM_LPS.GM_LP.sigGenes <- GM_LPS.GM_LP.sigGenes[order(-GM_LPS.GM_LP.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- GM_LPS.GM_LP.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC)>1)
+
+##Save DE genes
+write.table(DEG, "DEG_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG, "DEG_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+```
+
+##GM_LPS v GM_LA
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+GM_LPS.GM_LA.contr.mat <- makeContrasts(GM_LPSvGM_LA=((condGM_LPS-condGM_NS)-(condGM_LA-condGM_NS)), levels=v$design)
+GM_LPS.GM_LA.fit <- contrasts.fit(fit, GM_LPS.GM_LA.contr.mat)
+GM_LPS.GM_LA.eb <- eBayes(GM_LPS.GM_LA.fit)
+GM_LPS.GM_LA.topTab <- topTable(GM_LPS.GM_LA.eb, coef="GM_LPSvGM_LA", number=nrow(v$E))
+GM_LPS.GM_LA.topTab <- cbind(rownames(GM_LPS.GM_LA.topTab), GM_LPS.GM_LA.topTab)
+colnames(GM_LPS.GM_LA.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(GM_LPS.GM_LA.topTab) <- c(1:nrow(GM_LPS.GM_LA.topTab))
+
+write.csv(GM_LPS.GM_LA.topTab, file="topTab_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171023.csv", row.names=F, quote=F)
+
+##Limit list to genes with an adjusted p value < 0.05
+GM_LPS.GM_LA.sigGenes <- GM_LPS.GM_LA.topTab[GM_LPS.GM_LA.topTab$adj.P.Val <0.05, ]
+length(GM_LPS.GM_LA.sigGenes$ID)
+##[1] 17
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+GM_LPS.GM_LA.sigGenesFold1 <- subset(GM_LPS.GM_LA.sigGenes, abs(logFC) > 1)
+length(GM_LPS.GM_LA.sigGenesFold1$ID)
+##[1] 15
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+GM_LPS.GM_LA.sigGenesFold2 <- subset(GM_LPS.GM_LA.sigGenes, abs(logFC) > 2)
+length(GM_LPS.GM_LA.sigGenesFold2$ID)
+##[1] 7
+
+##Make an MA plot
+sel <- GM_LPS.GM_LA.topTab$adj.P.Val < 0.05
+top <- GM_LPS.GM_LA.topTab
+sub <- paste("No. of sig. genes: ", sum(sel),"/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="GM_LPSvGM_LA adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID,])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "MAplot_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.pdf", width=8, height=8)
+dev.off()
+
+dev.copy(png, "MAplot_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.png", width=700, height=700)
+dev.off()
+
+GM_LPS.GM_LA.sigGenes <- GM_LPS.GM_LA.sigGenes[order(-GM_LPS.GM_LA.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- GM_LPS.GM_LA.sigGenes
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="www.ensembl.org")
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"), filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC)>1)
+
+##Save DE genes
+write.table(DEG, "DEG_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.txt", col.names=T, row.names=F, quote=F)
+write.csv(DEG, "DEG_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.csv", row.names=F, quote=F)
+```
+
+## Venn Diagram of shared DEG between M-CSF LPS v LA v LP
+
+Upregulated genes compared to NS
+
+```{r}
+v_data <- list(DEG_LA4[DEG_LA4$logFC >0, ]$ID, DEG_LP4[DEG_LP4$logFC >0, ]$ID, DEG_LPS[DEG_LPS$logFC >0, ]$ID)
+v_data <- Venn(v_data, SetNames=c("LPS+Ado", "LPS+PGE2", "LPS"), numberOfSets=3)
+plot(v_data, doWeights=F)
+##dev.copy(png, "VennDiagram Upregulated LPS LA LP", width=700, height=700)
+##dev.off();
+```
+
+Downregulated genes compared to NS
+
+```{r}
+v_data <- list(DEG_LA4[DEG_LA4$logFC <0, ]$ID, DEG_LP4[DEG_LP4$logFC <0, ]$ID, DEG_LPS[DEG_LPS$logFC <0, ]$ID)
+v_data <- Venn(v_data, SetNames=c("LPS+Ado", "LPS+PGE2", "LPS"), numberOfSets=3)
+plot(v_data, doWeights=F)
+##dev.copy(png, "VennDiagram Downregulated LPS LA LP", width=700, height=700)
+##dev.off();
+```
+
+## Volcano Plots
+
+M_LPS v M_LA
+
+```{r, eval=FALSE}
+res <- read.table("topTab_M_LPSvM_LA_CDS_limmabatchcorrection_20171120.txt", header=TRUE)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20, main="Volcano plot M_LPS v M_LA", xlim=c(-7, 7)))
+
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val<.05 ), points(logFC, -log10(P.Value), cex=0.8, pch=20, col="violetred2"))
+with(subset(res, abs(logFC)>1), points(logFC, -log10(P.Value), cex=0.8, pch=20, col="orange"))
+with(subset(res, adj.P.Val<.05 & abs(logFC)>1), points(logFC, -log10(P.Value), cex=0.8, pch=20, col="turquoise3"))
+##dev.copy(png, "VolcanoPlot M_LPS v M_LA", width=700, height=700)
+##dev.off();
+```
+
+M_LPS v M_LP
+
+```{r, eval=FALSE}
+res <- read.csv("topTab_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv", header=TRUE)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20, main="Volcano plot M_LPS v M_LP", xlim=c(-7, 7)))
+
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val<.05 ), points(logFC, -log10(P.Value), cex=0.8, pch=20, col="violetred2"))
+with(subset(res, abs(logFC)>1), points(logFC, -log10(P.Value), cex=0.8, pch=20, col="orange"))
+with(subset(res, adj.P.Val<.05 & abs(logFC)>1), points(logFC, -log10(P.Value), cex=0.8, pch=20, col="turquoise3"))
+##dev.copy(png, "VolcanoPlot M_LPS v M_LP", width=700, height=700)
+##dev.off();
+```
+
+## Rich Factor Graphs
+
+## GO terms shared LA LP
+
+```{r}
+GOSharedpathways <- read.table("GO MF FDR .05 TOP 5 only-2.txt", header=TRUE, sep='\t')
+GOSharedpathways <- GOSharedpathways[order(GOSharedpathways$p.Value, decreasing=TRUE), ]
+
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 18, 3, 8))
+plot(GOSharedpathways$Rich.Factor, c(1:5), axes=F,
+     panel.first=abline(h=1:5, v=seq(0.1, 0.6, 0.1), col="grey90"),
+     cex=as.numeric(GOSharedpathways$Gene.Number)/4,
+     col=colorRamp[cut(as.numeric(GOSharedpathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.04))
+axis(side=2, at=1:5, labels=as.character(GOSharedpathways$GeneSet), las=2, cex.axis=0.5)
+axis(side=1, tick=GOSharedpathways[["Rich.Factor"]])
+```
+
+
+### KEGG LA
+
+```{r, eval=FALSE}
+LApathways <- read.table("Cytoscape Pathways/LA v LPS.txt", header=TRUE, sep='\t')
+LApathways <- LApathways[order(LApathways$p.Value, decreasing=TRUE), ]
+#plot x v. y, change size, assign color to p-value
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 18, 3, 8))
+plot(LApathways$Rich.Factor, c(1:28), axes=F,
+     panel.first=abline(h=1:28, v=seq(0.1, 0.4, 0.1), col="grey90"),
+     cex=as.numeric(LApathways$Gene.Number)/10,
+     col=colorRamp[cut(as.numeric(LApathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.4))
+axis(side=2, at=1:28, labels=as.character(LApathways$Pathway), las=2, cex.axis=0.8)
+axis(side=1, tick=LApathways$Rich.Factor, pos=0.4)
+```
+
+### GO LA
+
+```{r, eval=FALSE}
+GOLApathways <- read.table("Cytoscape Pathways/GO BP LA whole network.txt", header=TRUE, sep='\t')
+GOLApathways <- GOLApathways[order(GOLApathways$p.Value, decreasing=TRUE), ]
+##plot x v. y, change size, assign color to p-value
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 20, 3, 8))
+plot(GOLApathways$Rich.Factor, c(1:57), axes=F,
+     panel.first=abline(h=1:57, v=seq(0.1, 0.5, 0.1), col="grey90"),
+     cex=as.numeric(GOLApathways$Gene.Number)/10,
+     col=colorRamp[cut(as.numeric(GOLApathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.5))
+axis(side=2,at=1:57, labels=as.character(GOLApathways$Pathway), las=2, cex.axis=0.8)
+axis(side=1, tick=GOLApathways$Rich.Factor, pos=0.4)
+```
+
+### GO LP
+
+```{r, eval=FALSE}
+GOLPpathways <- read.table("Cytoscape Pathways/GO_BP_LPvLPS.txt", header=TRUE, sep='\t')
+GOLPpathways <- GOLPpathways[order(GOLPpathways$p.Value, decreasing=TRUE), ]
+
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 18, 3, 8))
+plot(GOLPpathways$Rich.Factor, c(1:35), axes=F,
+     panel.first=abline(h=1:35, v=seq(0.1, 0.6, 0.1), col="grey90"),
+     cex=as.numeric(GOLPpathways$Gene.Number)/20,
+     col=colorRamp[cut(as.numeric(GOLPpathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.6))
+axis(side=2, at=1:35, labels=as.character(GOLPpathways$Pathway), las=2, cex.axis=0.5)
+axis(side=1, tick=GOLPpathways$Rich.Factor, pos=0.4)
+```
