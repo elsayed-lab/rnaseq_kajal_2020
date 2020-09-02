@@ -1,0 +1,2017 @@
+---
+title: "Human Macrophages: M-CSF v GM-CSF: LPS, LPS+Adenosine, LPS+PGE2"
+author: "Kajal Hamidzadeh and atb"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    number_sections: true
+    self_contained: true
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+      rmdformats::readthedown:
+        code_download: true
+        code_folding: show
+        df_print: paged
+        fig_caption: true
+        fig_height: 7
+        fig_width: 7
+        highlight: tango
+        width: 300
+        keep_md: false
+        mode: selfcontained
+        toc_float: true
+        BiocStyle::html_document:
+          code_download: true
+          code_folding: show
+          fig_caption: true
+          fig_height: 7
+          fig_width: 7
+          highlight: tango
+          keep_md: false
+          mode: selfcontained
+          toc_float: true
+---
+
+<style type="text/css">
+body, td {
+  font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+  font-size: 16px
+}
+</style>
+
+```{r options, include=FALSE}
+library("hpgltools")
+tt <- devtools::load_all("/data/hpgltools")
+knitr::opts_knit$set(width=120,
+                     progress=TRUE,
+                     verbose=TRUE,
+                     echo=TRUE)
+knitr::opts_chunk$set(error=TRUE,
+                      dpi=96)
+old_options <- options(digits=4,
+                       stringsAsFactors=FALSE,
+                       knitr.duplicate.label="allow")
+ggplot2::theme_set(ggplot2::theme_bw(base_size=10))
+rundate <- format(Sys.Date(), format="%Y%m%d")
+previous_file <- ""
+ver <- "20200330"
+
+## tmp <- sm(loadme(filename=paste0(gsub(pattern="\\.Rmd", replace="", x=previous_file), "-v", ver, ".rda.xz")))
+## rmd_file <- "03_expression_infection_20180822.Rmd"
+```
+
+# A version of Kajal's R markdown document with some more minor changes
+
+## Libraries
+
+```{r libraries, warning=FALSE, message=FALSE, include=FALSE}
+library(devtools)
+library(tximport)
+library(biomaRt)
+library(hpgltools)
+library(DESeq2)
+library(gplots)
+library(ggplot2)
+library(cbcbSEQ)
+library(RColorBrewer)
+library(Vennerable)
+library(edgeR)
+library(calibrate)
+library(scales)
+```
+
+In this version of Kajal's document, I will repeat each step with some changes
+to see if I can make things a little easier for future modification.
+
+I will therefore leave Kajal's work unchanged and follow each block with an alternative.
+
+## Set working directory, import metadata and abundance files
+
+```{r read_data}
+design <- read.table("sample_sheets/MetaData only 4 hour.txt", header=TRUE, sep="\t")
+design[["Patient"]] <- as.factor(design[["Patient"]])
+design[["Stimulation"]] <- as.factor(design[["Stimulation"]])
+design[["Batch"]] <- as.factor(design[["Batch"]])
+design[["Growth"]] <- as.factor(design[["Growth"]])
+files <- file.path("kallisto abundance files/", design$HPGL.Identifier, "abundance.tsv")
+names(files) <- paste0("HPGL09", c(12:31, 42:60))
+rownames(design) <- design[[1]]
+
+stim_design_idx <- design[["Stimulation"]] != "NS"
+stim_design <- design[stim_design_idx, ]
+```
+
+## Convert transcript ID to gene ID
+
+```{r ensembl}
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl",
+                   host="useast.ensembl.org")
+tx2gene <- getBM(attributes=c("ensembl_transcript_id", "ensembl_gene_id", "chromosome_name"),
+                 mart=ensembl)
+good_idx <- grepl(x=tx2gene[["chromosome_name"]], pattern="^[[:alnum:]]{1,2}$")
+good_ones <- tx2gene[good_idx, -3]
+```
+
+## Create counts table
+
+```{r}
+txi.kallisto.tsv <- tximport(files, type="kallisto", tx2gene=good_ones,
+                             countsFromAbundance="lengthScaledTPM")
+nrow(txi.kallisto.tsv$counts)
+
+write.table(txi.kallisto.tsv$counts, "TPM_MvGM_CDS_20180711.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(txi.kallisto.tsv$counts, "csv/TPM_MvGM_20180711.csv",
+          row.names=TRUE, quote=FALSE)
+
+stim_counts <- txi.kallisto.tsv$counts
+stim_counts_idx <- colnames(stim_counts) %in% rownames(stim_design)
+stim_counts <- stim_counts[, stim_counts_idx]
+```
+
+This is a potentially important difference in how I and Kajal treated the data.
+This is because I created the expressionset without using 'lengthScaledTPM',
+but let tximport use the raw counts so that the various normalizations are not
+affected.  E.g. using these scaled numbers results in less variance in the data
+and may lead to some confusion for the downstream tools
+(edger/limma/deseq/etc).  On the other hand, it may lead to cleaner plots, I am
+not sure.
+
+## Create DESeqDataSet
+
+Not sure what this is actually doing
+
+```{r deseq_dds}
+df <- data.frame(condition=paste(design$HPGL.Identifier, design$Growth,
+                                 design$Stimulation, design$Patient, sep="_"))
+rownames(df) <- colnames(txi.kallisto.tsv$counts)
+dds <- DESeqDataSetFromTximport(txi.kallisto.tsv, df, ~condition)
+nrow(dds)
+
+dds_stim <- dds[, rownames(stim_design)]
+```
+
+## My version of the above
+
+```{r atb_read_data}
+my_design <- design
+rownames(my_design) <- design[[1]]
+my_design[["condition"]] <- my_design[["Stimulation"]]
+my_design[["file"]] <- glue::glue("preprocessing/{rownames(my_design)}/abundance.tsv")
+colnames(my_design) <- tolower(colnames(my_design))
+gene_info <- load_biomart_annotations(host="useast.ensembl.org")$annotation
+rownames(gene_info) <- make.names(gene_info[["ensembl_gene_id"]], unique=TRUE)
+tx_gene_map <- gene_info[, c("ensembl_transcript_id", "ensembl_gene_id")]
+hs_expt <- create_expt(metadata=my_design, gene_info=gene_info, tx_gene_map=tx_gene_map)
+hs_expt <- set_expt_batches(hs_expt, fact="growth")
+
+stim_expt <- subset_expt(hs_expt, subset="stimulation!='NS'")
+```
+
+## Bar Plot of Counts
+
+```{r barplot}
+par(mar=c(10, 4.5, 3.5, 1))
+par(oma=c(0, 0, 0, 0))
+barplot(colSums(txi.kallisto.tsv$counts), las=3, main="Raw Counts By Sample")
+barplot(colSums(stim_counts), las=3, main="Raw Counts By Sample")
+```
+
+## My Barplot of counts
+
+```{r my_barplot}
+libsize <- plot_libsize(hs_expt)
+libsize$plot
+libsize$summary
+
+plot_libsize(stim_expt)$plot
+```
+
+## Box Plot of Counts
+
+```{r count_barplot}
+dds <- estimateSizeFactors(dds)
+ncts <- counts(dds, normalized=TRUE)
+y <- log(ncts + 1)
+
+par(mar=c(5, 5, 2, 1))
+par(oma=c(0, 0, 0, 0))
+boxplot(y, names=colnames(txi.kallisto.tsv$counts),
+        las=3, main="Per Sample Log of Size-factor Counts")
+
+dds_stim <- estimateSizeFactors(dds_stim)
+stim_ncts <- counts(dds_stim, normalized=TRUE)
+stim_y <- log(stim_ncts + 1)
+
+par(mar=c(5, 5, 2, 1))
+par(oma=c(0, 0, 0, 0))
+boxplot(stim_y, names=colnames(stim_counts), las=3,
+        main="Per Sample Log of Size-factor Counts")
+```
+
+```{r my_boxplot}
+boxplot <- plot_boxplot(hs_expt)
+boxplot
+```
+
+## Heatmap of Pearson Correlation
+
+```{r corheat}
+datCor <- cor(txi.kallisto.tsv$counts)
+heatmap.2(datCor, Rowv=NA, Colv=NA, margins=c(10, 10),
+          labRow=df$condition, labCol=df$condition,
+          dendrogram="none", scale="none", trace="none",
+          srtCol=45, main="Pearson Correlation")
+
+stim_datCor <- cor(stim_counts)
+heatmap.2(stim_datCor, Rowv=NA, Colv=NA, margins=c(10, 10),
+          labRow=df$condition, labCol=df$condition,
+          dendrogram="none", scale="none", trace="none",
+          srtCol=45, main="Pearson Correlation")
+```
+
+### Try out ggstatsplot for this
+
+```{r ggtesting}
+library(ggstatsplot)
+ggtest <- ggcorrmat(as.data.frame(stim_counts), type="robust",
+                    sig.level=0.001, p.adjust.method="holm")
+limits <- c(min(ggtest[["data"]][["coef"]]), 1)
+ggtest <- ggtest + scale_fill_gradient(
+             low="black", high="red", limit=limits) +
+  theme(axis.text.y=element_text(size=6),
+        legend.position="top")
+
+library(ggdendro)
+dendro_mtrx <- dcast(data=ggtest[["data"]], formula=Var1 ~ Var2, value.var="coef")
+rownames(dendro_mtrx) <- dendro_mtrx[["Var1"]]
+dendro_mtrx[["Var1"]] <- NULL
+dendro_mtrx <- as.matrix(dendro_mtrx)
+dendro <- as.dendrogram(hclust(d=dist(x=dendro_mtrx)))
+dendro_plot <- ggdendrogram(data=dendro, rotate=TRUE)
+
+library(grid)
+grid.newpage()
+print(ggtest, vp = viewport(x = 0.4, y = 0.5, width = 0.8, height = 1.0))
+print(dendro_plot, vp = viewport(x = 0.90, y = 0.445, width = 0.2, height = 1.0))
+```
+
+
+```{r my_corheat}
+plot_corheat(hs_expt)$plot
+plot_corheat(stim_expt)$plot
+```
+
+## Filter and Normalize Counts
+
+```{r}
+filterCounts <- function (counts, lib.size=NULL, thresh=1, minSamples=2) {
+  cpms <- 2 ^ log2CPM(counts, lib.size = lib.size)$y
+  keep <- rowSums(cpms > thresh) >= minSamples
+  counts <- counts[keep, ]
+  counts
+}
+
+x_table <- table(design$Stimulation)
+dim(txi.kallisto.tsv$counts)
+
+counts <- filterCounts(txi.kallisto.tsv$counts, thresh=1, minSamples=min(x_table))
+dim(counts)
+countsSubQ <- qNorm(counts)
+x <- log2CPM(countsSubQ)
+s <- makeSVD(x$y)
+
+stim_table <- table(stim_design$Stimulation)
+stim_counts <- filterCounts(stim_counts, thresh=1, minSamples=min(stim_table))
+dim(stim_counts)
+stim_countsSubQ <- qNorm(stim_counts)
+stim_x <- log2CPM(stim_countsSubQ)
+stim_s <- makeSVD(stim_x$y)
+```
+
+## Median Pairwise Correlation
+
+```{r smc}
+corM <- matrixStats::rowMedians(cor(txi.kallisto.tsv$counts))
+qs <- quantile(corM, p=c(1, 3) / 4)
+iqr <- diff(qs)
+outLimit <- qs[1] - 1.5 * iqr
+ylim <- c(pmin(min(corM), outLimit), max(corM))
+cond <- paste(design$Growth, design$Stimulation, sep="_")
+col <- ifelse(cond == "M_NS", "gray60",
+       ifelse(cond == "M_LPS", "deeppink3",
+       ifelse(cond == "M_LA", "darkseagreen2",
+       ifelse(cond == "M_LP", "lavender",
+       ifelse(cond == "GM_NS", "lightpink1",
+       ifelse(cond == "GM_LPS", "moccasin",
+       ifelse(cond == "GM_LA", "black",
+       ifelse(cond == "GM_LP", "springgreen4", "blue2"))))))))
+par(mar=c(5, 4.5, 2, 1))
+plot(corM, xaxt="n", ylim=ylim, ylab="Median Pairwise Correlation",
+     xlab="", main="", col=col, pch=16, cex=1.5)
+axis(side=1, at=seq(along=corM), labels=colnames(txi.kallisto.tsv$counts), las=2)
+abline(h=outLimit, lty=2)
+abline(v=1:ncol(txi.kallisto.tsv$counts), lty=3, col="black")
+
+stim_corM <- matrixStats::rowMedians(cor(stim_counts))
+stim_qs <- quantile(stim_corM, p=c(1, 3) / 4)
+stim_iqr <- diff(stim_qs)
+stim_outLimit <- stim_qs[1] - (1.5 * iqr)
+stim_ylim <- c(pmin(min(stim_corM), stim_outLimit), max(stim_corM))
+stim_cond <- paste(stim_design$Growth, stim_design$Stimulation, sep="_")
+col <- ifelse(cond=="M_NS", "gray60",
+       ifelse(cond=="M_LPS", "deeppink3",
+       ifelse(cond=="M_LA", "darkseagreen2",
+       ifelse(cond=="M_LP", "lavender",
+       ifelse(cond=="GM_NS", "lightpink1",
+       ifelse(cond=="GM_LPS", "moccasin",
+       ifelse(cond=="GM_LA", "black",
+       ifelse(cond=="GM_LP", "springgreen4", "blue2"))))))))
+par(mar=c(5, 4.5, 2, 1))
+plot(stim_corM, xaxt="n", ylim=ylim, ylab="Median Pairwise Correlation",
+     xlab="", main="", col=col, pch=16, cex=1.5)
+axis(side=1, at=seq(along=stim_corM), labels=colnames(stim_counts), las=2)
+abline(h=stim_outLimit, lty=2)
+abline(v=1:ncol(stim_counts), lty=3, col="black")
+```
+
+```{r my_smc}
+plot_sm(hs_expt)$plot
+plot_sm(stim_expt)$plot
+```
+
+## PCA
+
+```{r}
+cbcbSEQ::pcRes(s$v, s$d, cond, design$Batch)[1:5, ]
+cbcbSEQ::pcRes(s$v, s$d, cond, design$Patient)[1:5, ]
+cbcbSEQ::pcRes(stim_s$v, stim_s$d, stim_cond, stim_design$Batch)[1:5, ]
+cbcbSEQ::pcRes(stim_s$v, stim_s$d, stim_cond, stim_design$Patient)[1:5, ]
+```
+
+## Euclidian Distance Heat Map
+
+```{r disheat}
+dists <- dist(t(counts))
+mat <- as.matrix(dists)
+rownames(mat) <- colnames(mat) <- cond
+hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+vec.patient <- rainbow(nlevels(design$Patient), start=0, end=0.8)
+patient.color <- rep(0, length(design$Patient))
+for (i in 1:length(design$Patient)) {
+  patient.color[i] <- vec.patient[design$Patient[i] == levels(design$Patient)]
+}
+vec.condition <- c("green", "lightblue", "pink", "purple")
+condition.color <- rep(0, length(design$Stimulation))
+for (i in 1:length(design$Stimulation)) {
+  condition.color[i] <- vec.condition[design$Stimulation[i] == levels(design$Stimulation)]
+}
+
+heatmap <- heatmap.2(mat, trace="none", col=rev(hmcol), margin=c(11, 11),
+                     ColSideColors=condition.color,
+                     RowSideColors=patient.color, key=FALSE, srtCol=45)
+
+stim_dists <- dist(t(stim_counts))
+stim_mat <- as.matrix(stim_dists)
+rownames(stim_mat) <- colnames(stim_mat) <- stim_cond
+stim_hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+stim_vec.patient <- rainbow(nlevels(stim_design$Patient), start=0, end=0.8)
+stim_patient.color <- rep(0, length(stim_design$Patient))
+for (i in 1:length(stim_design$Patient)) {
+  idx <- stim_design$Patient[i] == levels(stim_design$Patient)
+  stim_patient.color[i] <- stim_vec.patient[idx]
+}
+stim_vec.condition <- c("green", "lightblue", "pink", "purple")
+stim_condition.color <- rep(0, length(stim_design$Stimulation))
+for (i in 1:length(stim_design$Stimulation)) {
+  idx <- stim_design$Stimulation[i] == levels(stim_design$Stimulation)
+  stim_condition.color[i] <- stim_vec.condition[idx]
+}
+heatmap <- heatmap.2(stim_mat, trace="none", col=rev(hmcol), margin=c(11, 11),
+                     ColSideColors=stim_condition.color,
+                     RowSideColors=stim_patient.color, key=FALSE, srtCol=45)
+```
+
+```{r my_disheat}
+my_disheat <- plot_disheat(hs_expt)
+stim_disheat <- plot_disheat(stim_expt)
+```
+
+## Plot PC1 v PC2
+
+```{r original_pca}
+condnum <- as.numeric(as.factor(design$Stimulation))
+condnum <- ifelse(condnum == 4, "green",
+           ifelse(condnum == 3, "lightblue",
+           ifelse(condnum == 2, "pink",
+           ifelse(condnum == 1, "purple", "black"))))
+patnum <- as.numeric(as.factor(design$Patient))
+patnum <- ifelse(patnum == 4, 21,
+          ifelse(patnum == 3, 22,
+          ifelse(patnum == 2, 23,
+          ifelse(patnum == 1, 24,
+          ifelse(patnum == 5, 25, 1)))))
+cbcbSEQ::plotPC(s$v, s$d, col="black", pch=patnum, bg=condnum)
+legend(x=0.2, y=0.2, legend=unique(design$Stimulation), pch=22, col=0,
+       pt.bg=c("green", "lightblue", "pink", "purple"), pt.cex=1.5, cex=0.5, bty="n")
+legend(x=0.2, y=-0.1, legend=unique(design$Patient), pch=unique(patnum), col=0,
+       pt.bg="gray90", pt.cex=1.5, cex=0.5, bty="n")
+
+stim_condnum <- as.numeric(as.factor(stim_design$Stimulation))
+stim_condnum <- ifelse(stim_condnum == 4, "green",
+                ifelse(stim_condnum == 3, "lightblue",
+                ifelse(stim_condnum == 2, "pink",
+                ifelse(stim_condnum == 1, "purple", "black"))))
+stim_patnum <- as.numeric(as.factor(stim_design$Patient))
+stim_patnum <- ifelse(stim_patnum == 4, 21,
+               ifelse(stim_patnum == 3, 22,
+               ifelse(stim_patnum == 2, 23,
+               ifelse(stim_patnum == 1, 24,
+               ifelse(stim_patnum == 5, 25, 1)))))
+cbcbSEQ::plotPC(stim_s$v, stim_s$d, col="black", pch=stim_patnum, bg=stim_condnum)
+legend(x=0.2, y=0.2, legend=unique(stim_design$Stimulation), pch=22, col=0,
+       pt.bg=c("green","lightblue","pink","purple"), pt.cex=1.5, cex=0.5, bty="n")
+legend(x=0.2, y=-0.1, legend=unique(stim_design$Patient), pch=unique(stim_patnum), col=0,
+       pt.bg="gray90", pt.cex=1.5, cex=0.5, bty="n")
+```
+
+```{r my_pca}
+hs_norm <- normalize_expt(hs_expt, norm="quant", filter="cbcb", transform="log2")
+my_pca <- plot_pca(hs_norm, plot_labels=FALSE, cis=NULL)
+my_pca$plot
+
+hsstim_norm <- normalize_expt(stim_expt, norm="quant", filter="cbcb", transform="log2")
+stim_pca <- plot_pca(hsstim_norm, plot_labels=FALSE, cis=NULL)
+stim_pca$plot
+```
+
+## Correct for Patient in Limma model
+
+```{r}
+mod <- model.matrix(~design$Patient)
+v <- voom(countsSubQ, mod)
+fit <- lmFit(v)
+newData <- residuals(fit, v)
+s <- makeSVD(newData)
+pcRes(s$v, s$d, cond, design$Batch)[1:5, ]
+pcRes(s$v, s$d, cond, design$Patient)[1:5, ]
+
+stim_table <- table(stim_design$Stimulation)
+stim_counts <- filterCounts(stim_counts, thresh=2, minSamples=min(stim_table))
+dim(stim_counts)
+stim_countsSubQ <- qNorm(stim_counts)
+stim_mod <- model.matrix(~stim_design$Patient)
+stim_v <- voom(stim_countsSubQ, stim_mod)
+stim_fit <- lmFit(stim_v)
+stim_newData <- residuals(stim_fit, stim_v)
+stim_s <- makeSVD(stim_newData)
+pcRes(stim_s$v, stim_s$d, stim_cond, stim_design$Batch)[1:5, ]
+pcRes(stim_s$v, stim_s$d, stim_cond, stim_design$Patient)[1:5, ]
+```
+
+## Plot PC1 and PC2 with patient correction
+
+```{r}
+gronum <- as.numeric(as.factor(design$Growth))
+gronum <- ifelse(gronum == 2, 19,
+          ifelse(gronum == 1, 15, 1))
+patnum <- as.numeric(as.factor(design$Patient))
+patnum <- ifelse(patnum == 1, "pink",
+          ifelse(patnum == 2, "green",
+          ifelse(patnum == 3, "blue",
+          ifelse(patnum == 4, "yellow",
+          ifelse(patnum == 5, "black", "orange")))))
+samplenum <- as.numeric(as.factor(design$Stimulation))
+samplenum <- ifelse(samplenum == 4, "green",
+             ifelse(samplenum == 3, "blue",
+             ifelse(samplenum == 1, "black",
+             ifelse(samplenum == 2, "yellow", "grey"))))
+plotPC(s$v, s$d, pch=gronum, col=samplenum, cex=2)
+legend(x=0.05, y=0.3, legend=c("NS", "LPS", "LP", "LA"), pch=22, col=0,
+       pt.bg=c("green", "blue", "black", "yellow"), pt.cex=1.5, cex=1, bty="n")
+legend(x=0.05, y=0.1, legend=unique(design$Growth), pch=unique(gronum), col="black",
+       pt.bg="black", pt.cex=1.0, cex=1, bty="n")
+
+stim_gronum <- as.numeric(as.factor(stim_design$Growth))
+stim_gronum <- ifelse(stim_gronum == 2, 19,
+               ifelse(stim_gronum == 1, 15, 1))
+stim_patnum <- as.numeric(as.factor(stim_design$Patient))
+stim_patnum <- ifelse(stim_patnum == 1, "pink",
+               ifelse(stim_patnum == 2, "green",
+               ifelse(stim_patnum == 3, "blue",
+               ifelse(stim_patnum == 4, "yellow",
+               ifelse(stim_patnum == 5, "black", "orange")))))
+stim_samplenum <- as.numeric(as.factor(stim_design$Stimulation))
+stim_samplenum <- ifelse(stim_samplenum == 3, "green",
+                  ifelse(stim_samplenum == 2, "blue",
+                  ifelse(stim_samplenum == 1, "black", "grey")))
+plotPC(stim_s$v, stim_s$d, pch=stim_gronum, col=stim_samplenum, cex=2)
+legend(x=0.05, y=0.3, legend=c("LPS", "LP", "LA"), pch=22, col=0,
+       pt.bg=c("green", "blue", "black", "yellow"), pt.cex=1.5, cex=1, bty="n")
+legend(x=0.05, y=0.1, legend=unique(stim_design$Growth), pch=unique(stim_gronum),
+       col="black", pt.bg="black", pt.cex=1.0, cex=1, bty="n")
+```
+
+## My Figure 3A
+
+```{r my_pca2}
+##stim_counts <- filterCounts(stim_counts, thresh=1, minSamples=min(x))
+##dim(stim_counts)
+##stim_countsSubQ <- qNorm(stim_counts)
+##stim_x <- log2CPM(stim_countsSubQ)
+##stim_s <- makeSVD(stim_x$y)
+hss <- set_expt_batches(stim_expt, fact="patient")
+hss <- sm(normalize_expt(hss, filter=TRUE))
+hss <- sm(normalize_expt(hss, norm="quant"))
+hss <- sm(normalize_expt(hss, convert="cpm"))
+hss <- sm(normalize_expt(hss, transform="log2"))
+hss <- sm(normalize_expt(hss, batch="limma"))
+hss <- sm(set_expt_batches(hss, fact="growth"))
+plot_pca(hss, plot_labels=FALSE)$plot
+
+hss_varpart <- simple_varpart(expt=hss)
+hss_varplot <- plot_variance_coefficients(hss)
+pp(file="stimulation_coef.png", image=hss_varplot$plot)
+
+hss_varplot <- plot_variance_coefficients(hss, x_axis="batch")
+hss_varplot$plot
+pp(file="mgm_coef.png", image=hss_varplot$plot)
+
+tmp <- pData(hss)
+tmp[["both"]] <- paste0(tmp[["condition"]], "_", tmp[["batch"]])
+pData(hss[["expressionset"]]) <- tmp
+hss_both_varplot <- plot_variance_coefficients(hss, x_axis="both")
+pp(file="both_coef.png", image=hss_both_varplot$plot)
+```
+
+## Heatmap with patient correction??
+
+```{r}
+dists <- dist(t(newData))
+mat <- as.matrix(dists)
+rownames(mat) <- colnames(mat) <- cond
+heatmap <- heatmap.2(mat, trace="none", col=rev(hmcol), margin=c(11, 11),
+                     ColSideColors=condition.color,
+                     RowSideColors=patient.color, key=FALSE, srtCol=45)
+```
+
+## DE analysis
+
+```{r}
+countsSubQ <- qNorm(counts)
+patient <- design$Patient
+mod <- model.matrix(~ 0 + cond + patient, data=design)
+v <- voom(countsSubQ, mod, plot=TRUE)
+fit <- lmFit(v)
+```
+
+## M_LPS v M_NS
+
+eBayes finds an F-statistic from the set of t-statistics for that gene
+
+```{r}
+M_LPS.M_NS.contr.mat <- makeContrasts(M_LPSvM_NS=(condM_LPS - condM_NS), levels=v$design)
+M_LPS.M_NS.fit <- contrasts.fit(fit, M_LPS.M_NS.contr.mat)
+M_LPS.M_NS.eb <- eBayes(M_LPS.M_NS.fit)
+M_LPS.M_NS.topTab <- topTable(M_LPS.M_NS.eb, coef="M_LPSvM_NS", number=nrow(v$E))
+M_LPS.M_NS.topTab <- cbind(rownames(M_LPS.M_NS.topTab), M_LPS.M_NS.topTab)
+colnames(M_LPS.M_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LPS.M_NS.topTab) <- c(1:nrow(M_LPS.M_NS.topTab))
+
+lps_ns_table <- "csv/topTab_M_LPSvM_NS_CDS_limmabatchcorrection_20171120.csv"
+write.csv(M_LPS.M_NS.topTab, file=lps_ns_table,
+          row.names=FALSE, quote=FALSE)
+```
+
+Limit list to genes with an adjusted p value < 0.05
+
+```{r}
+M_LPS.M_NS.sigGenes <- M_LPS.M_NS.topTab[M_LPS.M_NS.topTab$adj.P.Val < 0.05, ]
+length(M_LPS.M_NS.sigGenes$ID)
+```
+
+Filter out rows with less than 2-fold change (log2 fold change of > 1)
+
+```{r}
+M_LPS.M_NS.sigGenesFold1 <- subset(M_LPS.M_NS.sigGenes, abs(logFC) > 1)
+length(M_LPS.M_NS.sigGenesFold1$ID)
+```
+
+Filter out rows with less than 4-fold change (log2 fold change of > 2)
+
+```{r}
+M_LPS.M_NS.sigGenesFold2 <- subset(M_LPS.M_NS.sigGenes, abs(logFC) > 2)
+length(M_LPS.M_NS.sigGenesFold2$ID)
+```
+
+Make an MA plot
+
+```{r}
+sel <- M_LPS.M_NS.topTab$adj.P.Val < 0.05
+top <- M_LPS.M_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPSvM_NS adjusted", ylab="log FC",
+     xlab="Average Expression", sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+```
+
+Annotate sigGenes list using Biomart
+
+```{r}
+M_LPS.M_NS.sigGenes <- M_LPS.M_NS.sigGenes[order(-M_LPS.M_NS.sigGenes$logFC), ]
+sigGenes <- M_LPS.M_NS.sigGenes
+ids <- sigGenes$ID
+
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id", values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG_LPS <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG_LPS <- subset(DEG_LPS,
+                  select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type),
+                  FS="/t")
+DEG_LPS <- DEG_LPS[order(-DEG_LPS$logFC), ]
+## Filter out Genes -1<FC<1
+DEG_LPS <- subset(DEG_LPS, abs(DEG_LPS$logFC)>1)
+
+## Save DE genes
+write.table(DEG_LPS, "csv/DEG_M_LPSvM_NS_CDS_limmabatchcorrection_20171120.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG_LPS, "csv/DEG_M_LPSvM_NS_CDS_limmabatchcorrection_20171120.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## M_LPS v M_LA
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LPS.M_LA.contr.mat <- makeContrasts(M_LPSvM_LA=((condM_LA - condM_NS) - (condM_LPS - condM_NS)),
+                                      levels=v$design)
+M_LPS.M_LA.fit <- contrasts.fit(fit, M_LPS.M_LA.contr.mat)
+M_LPS.M_LA.eb <- eBayes(M_LPS.M_LA.fit)
+M_LPS.M_LA.topTab <- topTable(M_LPS.M_LA.eb, coef="M_LPSvM_LA", number=nrow(v$E))
+M_LPS.M_LA.topTab <- cbind(rownames(M_LPS.M_LA.topTab), M_LPS.M_LA.topTab)
+colnames(M_LPS.M_LA.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LPS.M_LA.topTab) <- c(1:nrow(M_LPS.M_LA.topTab))
+
+lps_la_table <- "csv/topTab_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.csv"
+write.csv(M_LPS.M_LA.topTab, file=lps_la_table, row.names=FALSE, quote=FALSE)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LPS.M_LA.sigGenes <- M_LPS.M_LA.topTab[M_LPS.M_LA.topTab$adj.P.Val < 0.05, ]
+length(M_LPS.M_LA.sigGenes$ID)
+##[1] 617
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LPS.M_LA.sigGenesFold1 <- subset(M_LPS.M_LA.sigGenes, abs(logFC) > 1)
+length(M_LPS.M_LA.sigGenesFold1$ID)
+##[1] 240
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LPS.M_LA.sigGenesFold2 <- subset(M_LPS.M_LA.sigGenes, abs(logFC) > 2)
+length(M_LPS.M_LA.sigGenesFold2$ID)
+##[1] 69
+
+##Make an MA plot
+sel <- M_LPS.M_LA.topTab$adj.P.Val < 0.05
+top <- M_LPS.M_LA.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPSvM_LA adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.pdf",
+         width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.png",
+         width=700, height=700)
+dev.off()
+
+M_LPS.M_LA.sigGenes <- M_LPS.M_LA.sigGenes[order(-M_LPS.M_LA.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LPS.M_LA.sigGenes
+ids <- sigGenes$ID
+
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC) > 1)
+
+##Save DE genes
+write.table(DEG, "csv/DEG_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG, "csv/DEG_M_LPSvM_LA_CDS_limmabatchcorrection_20171120rev.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## M_LPS v M_LP
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LPS.M_LP.contr.mat <- makeContrasts(
+    M_LPSvM_LP=((condM_LP - condM_NS) - (condM_LPS - condM_NS)),
+    levels=v$design)
+M_LPS.M_LP.fit <- contrasts.fit(fit, M_LPS.M_LP.contr.mat)
+M_LPS.M_LP.eb <- eBayes(M_LPS.M_LP.fit)
+M_LPS.M_LP.topTab <- topTable(M_LPS.M_LP.eb, coef="M_LPSvM_LP", number=nrow(v$E))
+M_LPS.M_LP.topTab <- cbind(rownames(M_LPS.M_LP.topTab), M_LPS.M_LP.topTab)
+colnames(M_LPS.M_LP.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LPS.M_LP.topTab) <- c(1:nrow(M_LPS.M_LP.topTab))
+
+lps_lp_table <- "csv/topTab_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv"
+write.csv(M_LPS.M_LP.topTab, file=lps_lp_table, row.names=FALSE, quote=FALSE)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LPS.M_LP.sigGenes <- M_LPS.M_LP.topTab[M_LPS.M_LP.topTab$adj.P.Val < 0.05, ]
+length(M_LPS.M_LP.sigGenes$ID)
+##[1] 1473
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LPS.M_LP.sigGenesFold1 <- subset(M_LPS.M_LP.sigGenes, abs(logFC) > 1)
+length(M_LPS.M_LP.sigGenesFold1$ID)
+##[1] 467
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LPS.M_LP.sigGenesFold2 <- subset(M_LPS.M_LP.sigGenes, abs(logFC) > 2)
+length(M_LPS.M_LP.sigGenesFold2$ID)
+##[1] 125
+
+##Make an MA plot
+sel <- M_LPS.M_LP.topTab$adj.P.Val < 0.05
+top <- M_LPS.M_LP.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPSvM_LP adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.pdf",
+         width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.png",
+         width=700, height=700)
+dev.off()
+
+M_LPS.M_LP.sigGenes <- M_LPS.M_LP.sigGenes[order(-M_LPS.M_LP.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LPS.M_LP.sigGenes
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC) > 1)
+
+##Save DE genes
+write.table(DEG, "csv/DEG_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG, "csv/DEG_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## M_LP v M_NS
+
+```{r}
+##eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LP.M_NS.contr.mat <- makeContrasts(M_LPvM_NS=(condM_LP - condM_NS), levels=v$design)
+M_LP.M_NS.fit <- contrasts.fit(fit, M_LP.M_NS.contr.mat)
+M_LP.M_NS.eb <- eBayes(M_LP.M_NS.fit)
+M_LP.M_NS.topTab <- topTable(M_LP.M_NS.eb, coef="M_LPvM_NS", number=nrow(v$E))
+M_LP.M_NS.topTab <- cbind(rownames(M_LP.M_NS.topTab), M_LP.M_NS.topTab)
+colnames(M_LP.M_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LP.M_NS.topTab) <- c(1:nrow(M_LP.M_NS.topTab))
+
+lp_ns_table <- "csv/topTab_M_LPvM_NS_CDS_limmabatchcorrection_20171018.csv"
+write.csv(M_LP.M_NS.topTab, file=lp_ns_table, row.names=FALSE, quote=FALSE)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LP.M_NS.sigGenes <- M_LP.M_NS.topTab[M_LP.M_NS.topTab$adj.P.Val < 0.05, ]
+length(M_LP.M_NS.sigGenes$ID)
+##[1] 4386
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LP.M_NS.sigGenesFold1 <- subset(M_LP.M_NS.sigGenes, abs(logFC) > 1)
+length(M_LP.M_NS.sigGenesFold1$ID)
+##[1] 1455
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LP.M_NS.sigGenesFold2 <- subset(M_LP.M_NS.sigGenes, abs(logFC) > 2)
+length(M_LP.M_NS.sigGenesFold2$ID)
+##[1] 519
+
+##Make an MA plot
+sel <- M_LP.M_NS.topTab$adj.P.Val < 0.05
+top <- M_LP.M_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LPvM_NS adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID,])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_M_LPvM_NS_CDS_limmabatchcorrection_20171018.pdf",
+         width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_M_LPvM_NS_CDS_limmabatchcorrection_20171018.png",
+         width=700, height=700)
+dev.off()
+
+M_LP.M_NS.sigGenes <- M_LP.M_NS.sigGenes[order(-M_LP.M_NS.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LP.M_NS.sigGenes
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc)=c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG_LP4 <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG_LP4 <- subset(DEG_LP4, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type),
+                  FS="/t")
+DEG_LP4 <- DEG_LP4[order(-DEG_LP4$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG_LP4 <- subset(DEG_LP4, abs(DEG_LP4$logFC) > 1)
+
+##Save DE genes
+write.table(DEG_LP4, "csv/DEG_M_LPvM_NS_CDS_limmabatchcorrection_20171018.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG_LP4, "csv/DEG_M_LPvM_NS_CDS_limmabatchcorrection_20171018.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## M_LA v M_NS
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+M_LA.M_NS.contr.mat <- makeContrasts(M_LAvM_NS=(condM_LA - condM_NS), levels=v$design)
+M_LA.M_NS.fit <- contrasts.fit(fit, M_LA.M_NS.contr.mat)
+M_LA.M_NS.eb <- eBayes(M_LA.M_NS.fit)
+M_LA.M_NS.topTab <- topTable(M_LA.M_NS.eb, coef="M_LAvM_NS", number=nrow(v$E))
+M_LA.M_NS.topTab <- cbind(rownames(M_LA.M_NS.topTab), M_LA.M_NS.topTab)
+colnames(M_LA.M_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(M_LA.M_NS.topTab) <- c(1:nrow(M_LA.M_NS.topTab))
+
+la_ns_table <- "csv/topTab_M_LAvM_NS_CDS_limmabatchcorrection_20171120.csv"
+write.csv(M_LA.M_NS.topTab, file=la_ns_table, row.names=FALSE, quote=FALSE)
+
+##Limit list to genes with an adjusted p value < 0.05
+M_LA.M_NS.sigGenes <- M_LA.M_NS.topTab[M_LA.M_NS.topTab$adj.P.Val < 0.05, ]
+length(M_LA.M_NS.sigGenes$ID)
+##[1] 617
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+M_LA.M_NS.sigGenesFold1 <- subset(M_LA.M_NS.sigGenes, abs(logFC) > 1)
+length(M_LA.M_NS.sigGenesFold1$ID)
+##[1] 240
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+M_LA.M_NS.sigGenesFold2 <- subset(M_LA.M_NS.sigGenes, abs(logFC) > 2)
+length(M_LA.M_NS.sigGenesFold2$ID)
+##[1] 69
+
+##Make an MA plot
+sel <- M_LA.M_NS.topTab$adj.P.Val < 0.05
+top <- M_LA.M_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="M_LAvM_NS adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_M_LAvM_NS_CDS_limmabatchcorrection_20171120.pdf", width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_M_LAvM_NS_CDS_limmabatchcorrection_20171120.png", width=700, height=700)
+dev.off()
+
+M_LA.M_NS.sigGenes <- M_LA.M_NS.sigGenes[order(-M_LA.M_NS.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- M_LA.M_NS.sigGenes
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG_LA4 <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG_LA4 <- subset(DEG_LA4, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type),
+                  FS="/t")
+DEG_LA4 <- DEG_LA4[order(-DEG_LA4$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG_LA4 <- subset(DEG_LA4, abs(DEG_LA4$logFC) > 1)
+
+##Save DE genes
+write.table(DEG_LA4, "csv/DEG_M_LAvM_NS_CDS_limmabatchcorrection_20171120.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG_LA4, "csv/DEG_M_LAvM_NS_CDS_limmabatchcorrection_20171120.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## GM_LPS v. GM_NS
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+GM_LPS.GM_NS.contr.mat <- makeContrasts(GM_LPSvGM_NS=(condGM_LPS-condGM_NS), levels=v$design)
+GM_LPS.GM_NS.fit <- contrasts.fit(fit, GM_LPS.GM_NS.contr.mat)
+GM_LPS.GM_NS.eb <- eBayes(GM_LPS.GM_NS.fit)
+GM_LPS.GM_NS.topTab <- topTable(GM_LPS.GM_NS.eb, coef="GM_LPSvGM_NS", number=nrow(v$E))
+GM_LPS.GM_NS.topTab <- cbind(rownames(GM_LPS.GM_NS.topTab), GM_LPS.GM_NS.topTab)
+colnames(GM_LPS.GM_NS.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(GM_LPS.GM_NS.topTab) <- c(1:nrow(GM_LPS.GM_NS.topTab))
+
+gm_lps_ns_table <- "csv/topTab_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.csv"
+write.csv(GM_LPS.GM_NS.topTab, file= gm_lps_ns_table, row.names=FALSE, quote=FALSE)
+
+##Limit list to genes with an adjusted p value < 0.05
+GM_LPS.GM_NS.sigGenes <- GM_LPS.GM_NS.topTab[GM_LPS.GM_NS.topTab$adj.P.Val < 0.05, ]
+length(GM_LPS.GM_NS.sigGenes$ID)
+##[1] 302
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+GM_LPS.GM_NS.sigGenesFold1 <- subset(GM_LPS.GM_NS.sigGenes, abs(logFC) > 1)
+length(GM_LPS.GM_NS.sigGenesFold1$ID)
+##[1] 197
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+GM_LPS.GM_NS.sigGenesFold2 <- subset(GM_LPS.GM_NS.sigGenes, abs(logFC) > 2)
+length(GM_LPS.GM_NS.sigGenesFold2$ID)
+##[1] 101
+
+##Make an MA plot
+sel <- GM_LPS.GM_NS.topTab$adj.P.Val < 0.05
+top <- GM_LPS.GM_NS.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="GM_LPSvGM_NS adjusted", ylab="log FC",
+     xlab="Average Expression", sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.pdf",
+         width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.png",
+         width=700, height=700)
+dev.off()
+
+GM_LPS.GM_NS.sigGenes <- GM_LPS.GM_NS.sigGenes[order(-GM_LPS.GM_NS.sigGenes$logFC), ]
+
+##Annotate sigGenes list using Biomart
+sigGenes <- GM_LPS.GM_NS.sigGenes
+ids <- sigGenes$ID
+
+##To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id",
+              values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC) > 1)
+
+##Save DE genes
+write.table(DEG, "csv/DEG_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG, "csv/DEG_GM_LPSvGM_NS_CDS_limmabatchcorrection_20171120.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## GM_LPS v GM_LP
+
+This contrast was written in the opposite order as the others, I think this is
+the reason some of my plots keep looking backwards/upsidedown...  I am going to
+comment out the original line and rewrite it so that it is identical in order to
+what I found in: M_LP.M_LP.contr.mat.
+
+```{r}
+#eBayes finds an F-statistic from the set of t-statistics for that gene
+
+## Here is the original line
+## look here ----------------------------------------------->   v                     v
+##GM_LPS.GM_LP.contr.mat <- makeContrasts(GM_LPSvGM_LP=((condGM_LPS-condGM_NS)-(condGM_LP-condGM_NS)),
+##                                        levels=v$design)
+##
+
+## And here is my version:
+## look here ----------------------------------------------->  v                     v
+GM_LPS.GM_LP.contr.mat <- makeContrasts(
+    GM_LPSvGM_LP=((condGM_LP - condGM_NS) - (condGM_LPS - condGM_NS)),
+    levels=v$design)
+## End of my change.
+
+GM_LPS.GM_LP.fit <- contrasts.fit(fit, GM_LPS.GM_LP.contr.mat)
+GM_LPS.GM_LP.eb <- eBayes(GM_LPS.GM_LP.fit)
+GM_LPS.GM_LP.topTab <- topTable(GM_LPS.GM_LP.eb, coef="GM_LPSvGM_LP", number=nrow(v$E))
+GM_LPS.GM_LP.topTab <- cbind(rownames(GM_LPS.GM_LP.topTab), GM_LPS.GM_LP.topTab)
+colnames(GM_LPS.GM_LP.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(GM_LPS.GM_LP.topTab) <- c(1:nrow(GM_LPS.GM_LP.topTab))
+
+gm_lps_lp_table <- "csv/topTab_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171023.csv"
+write.csv(GM_LPS.GM_LP.topTab, file=gm_lps_lp_table, row.names=FALSE, quote=FALSE)
+
+##Limit list to genes with an adjusted p value < 0.05
+GM_LPS.GM_LP.sigGenes <- GM_LPS.GM_LP.topTab[GM_LPS.GM_LP.topTab$adj.P.Val < 0.05, ]
+length(GM_LPS.GM_LP.sigGenes$ID)
+##[1] 194
+
+##Filter out rows with less than 2-fold change (log2 fold change of > 1)
+GM_LPS.GM_LP.sigGenesFold1 <- subset(GM_LPS.GM_LP.sigGenes, abs(logFC) > 1)
+length(GM_LPS.GM_LP.sigGenesFold1$ID)
+##[1] 114
+
+##Filter out rows with less than 4-fold change (log2 fold change of > 2)
+GM_LPS.GM_LP.sigGenesFold2 <- subset(GM_LPS.GM_LP.sigGenes, abs(logFC) > 2)
+length(GM_LPS.GM_LP.sigGenesFold2$ID)
+##[1] 27
+
+##Make an MA plot
+sel <- GM_LPS.GM_LP.topTab$adj.P.Val < 0.05
+top <- GM_LPS.GM_LP.topTab
+sub <- paste("No. of sig. genes: ", sum(sel), "/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="GM_LPSvGM_LP adjusted",
+     ylab="log FC", xlab="Average Expression",
+     sub=sub)
+points(rowMeans(cpm[top$ID, ])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.pdf",
+         width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.png",
+         width=700, height=700)
+dev.off()
+
+GM_LPS.GM_LP.sigGenes <- GM_LPS.GM_LP.sigGenes[order(-GM_LPS.GM_LP.sigGenes$logFC), ]
+
+## Annotate sigGenes list using Biomart
+sigGenes <- GM_LPS.GM_LP.sigGenes
+ids <- sigGenes$ID
+
+## To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id", values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+
+##Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+##Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC) > 1)
+
+##Save DE genes
+write.table(DEG, "csv/DEG_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG, "csv/DEG_GM_LPSvGM_LP_CDS_limmabatchcorrection_20171120.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## GM_LPS v GM_LA
+
+I think I observe the same flipping here.
+
+```{r}
+## eBayes finds an F-statistic from the set of t-statistics for that gene
+## GM_LPS.GM_LA.contr.mat <- makeContrasts(GM_LPSvGM_LA=((condGM_LPS-condGM_NS)-(condGM_LA-condGM_NS)),
+##                                         levels=v$design)
+GM_LPS.GM_LA.contr.mat <- makeContrasts(
+    GM_LPSvGM_LA=((condGM_LA - condGM_NS) - (condGM_LPS - condGM_NS)),
+    levels=v$design)
+## End of my change
+GM_LPS.GM_LA.fit <- contrasts.fit(fit, GM_LPS.GM_LA.contr.mat)
+GM_LPS.GM_LA.eb <- eBayes(GM_LPS.GM_LA.fit)
+GM_LPS.GM_LA.topTab <- topTable(GM_LPS.GM_LA.eb, coef="GM_LPSvGM_LA", number=nrow(v$E))
+GM_LPS.GM_LA.topTab <- cbind(rownames(GM_LPS.GM_LA.topTab), GM_LPS.GM_LA.topTab)
+colnames(GM_LPS.GM_LA.topTab) <- c("ID", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+rownames(GM_LPS.GM_LA.topTab) <- c(1:nrow(GM_LPS.GM_LA.topTab))
+
+gm_lps_la_table <- "csv/topTab_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171023.csv"
+write.csv(GM_LPS.GM_LA.topTab, file=gm_lps_la_table, row.names=FALSE, quote=FALSE)
+
+## Limit list to genes with an adjusted p value < 0.05
+GM_LPS.GM_LA.sigGenes <- GM_LPS.GM_LA.topTab[GM_LPS.GM_LA.topTab$adj.P.Val < 0.05, ]
+length(GM_LPS.GM_LA.sigGenes$ID)
+## [1] 17
+
+## Filter out rows with less than 2-fold change (log2 fold change of > 1)
+GM_LPS.GM_LA.sigGenesFold1 <- subset(GM_LPS.GM_LA.sigGenes, abs(logFC) > 1)
+length(GM_LPS.GM_LA.sigGenesFold1$ID)
+## [1] 15
+
+## Filter out rows with less than 4-fold change (log2 fold change of > 2)
+GM_LPS.GM_LA.sigGenesFold2 <- subset(GM_LPS.GM_LA.sigGenes, abs(logFC) > 2)
+length(GM_LPS.GM_LA.sigGenesFold2$ID)
+## [1] 7
+
+## Make an MA plot
+sel <- GM_LPS.GM_LA.topTab$adj.P.Val < 0.05
+top <- GM_LPS.GM_LA.topTab
+sub <- paste("No. of sig. genes: ", sum(sel),"/", length(sel))
+cpm <- v$E
+
+plot(rowMeans(cpm[top$ID,]), top$logFC, pch=16, cex=0.5, col="darkgrey",
+     main="GM_LPSvGM_LA adjusted", ylab="log FC", xlab="Average Expression", sub=sub)
+points(rowMeans(cpm[top$ID,])[sel], top$logFC[sel], col="red", cex=0.5)
+abline(h=c(-1, 0, 1), col="red")
+
+dev.copy(pdf, "images/MAplot_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.pdf",
+         width=8, height=8)
+dev.off()
+dev.copy(png, "images/MAplot_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.png",
+         width=700, height=700)
+dev.off()
+
+GM_LPS.GM_LA.sigGenes <- GM_LPS.GM_LA.sigGenes[order(-GM_LPS.GM_LA.sigGenes$logFC), ]
+
+## Annotate sigGenes list using Biomart
+sigGenes <- GM_LPS.GM_LA.sigGenes
+ids <- sigGenes$ID
+
+## To see possibilities for attributes, use head(listAttributes(ensembl), n=20L)
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id", values=ids, mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+
+## Remove commas from description
+desc$Description <- gsub(",", "", desc$Description)
+
+DEG <- merge(sigGenes, desc, by="ID", all=TRUE)
+DEG <- subset(DEG, select=c(ID, Symbol, Description, logFC, adj.P.Val, AveExpr, Type), FS="/t")
+DEG <- DEG[order(-DEG$logFC), ]
+
+## Filter out Genes -1<FC<1
+DEG <- subset(DEG, abs(DEG$logFC) > 1)
+
+## Save DE genes
+write.table(DEG, "csv/DEG_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.txt",
+            col.names=TRUE, row.names=FALSE, quote=FALSE)
+write.csv(DEG, "csv/DEG_GM_LPSvGM_LA_CDS_limmabatchcorrection_20171120.csv",
+          row.names=FALSE, quote=FALSE)
+```
+
+## Barplots of Fold-Changes, e.g. Figure 3C/D
+
+It appears to me that these figures are created by merging the M/GM tables for
+the LP-LPS and LA-LPS contrasts, taking the top ~20 for the M table, and
+plotting the log2FC on the linear scale.  I believe I can trivially modify this
+to add the logFC / t-stat.  The caveat will be that doing this gives me a log2
+error bar, not linear...  My inclination therefore is to just plot the logFC
+rather than convert it to linear, but whatever.
+
+### Figure 3C
+
+Najib and Dave want some significance test between the M/GM bars for these 20
+genes.  As I think about it, I think the only valid way to do this is to
+calculate the logFC of GM(PG/LP) / M(PG/LP).  Then let limma calculate the t
+statistic and p-value using its voom() modified values.
+
+```{r my_fig3c_stats}
+GM_PG.M_PG.contr.mat <- makeContrasts(
+    GM_PGvM_PG=((condGM_LP - condGM_LPS) - (condM_LP - condM_LPS)),
+    levels=v$design)
+GM_PG.M_PG.fit <- contrasts.fit(fit, GM_PG.M_PG.contr.mat)
+GM_PG.M_PG.eb <- eBayes(GM_PG.M_PG.fit)
+GM_PG.M_PG.topTab <- topTable(GM_PG.M_PG.eb, coef="GM_PGvM_PG", number=nrow(v$E))
+
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id", values=rownames(GM_PG.M_PG.topTab), mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+gene_symbols <- desc[, c("ID", "Symbol")]
+
+GM_PG.M_PG.topTab <- merge(gene_symbols, GM_PG.M_PG.topTab, by.x="ID", by.y="row.names")
+
+GM_LA.M_LA.contr.mat <- makeContrasts(
+    GM_LAvM_LA=((condGM_LA - condGM_LPS) - (condM_LA - condM_LPS)),
+    levels=v$design)
+GM_LA.M_LA.fit <- contrasts.fit(fit, GM_LA.M_LA.contr.mat)
+GM_LA.M_LA.eb <- eBayes(GM_LA.M_LA.fit)
+GM_LA.M_LA.topTab <- topTable(GM_LA.M_LA.eb, coef="GM_LAvM_LA", number=nrow(v$E))
+
+GM_LA.M_LA.topTab <- merge(gene_symbols, GM_LA.M_LA.topTab, by.x="ID", by.y="row.names")
+```
+
+### Figure 3C top-left
+
+Kajal's variables to create this are...
+
+1.  M_LPS.M_LP.topTab
+2.  GM_LPS.GM_LP.topTab
+
+These were passed to biomart to get the gene names rather than ensembl IDs.
+I am going to be lazy and just copy/paste Kajal's code for these tasks.
+
+Having done the top-left piece of this, it seems to me that if you are going to
+take the top 20 genes and exclude based on the M-CSF adjusted p-value, perhaps
+you should also exclude based on the GM-CSF adjusted p-value, but the way this
+was done, only the M is used.  In its current state, I am only using the M as
+per the figures in their current state.
+
+Note, that if you want error bars from the standard error, then it is waaaay
+easier to stay on the log2 scale rather than convert back to linear because the
+math for converting the standard error back to linear is weird.  If the table
+had a few more parameters in it, I could do it without struggling, but it doesn't.
+
+```{r fig3c_topleft}
+wanted_columns <- c("ID", "logFC.x", "logFC.y", "t.x", "t.y", "Symbol")
+renamed_columns <- c("ID", "m_logfc", "gm_logfc", "m_t", "gm_t", "symbol")
+
+fig3c_lp_df <- merge(M_LPS.M_LP.topTab, GM_LPS.GM_LP.topTab, by="ID")
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id", values=fig3c_lp_df[["ID"]], mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+fig3c_lp_df <- merge(fig3c_lp_df, desc, by="ID", all.x=TRUE)
+
+tl_order_idx <- order(fig3c_lp_df[["logFC.x"]], decreasing=TRUE)
+fig3c_tl_df <- fig3c_lp_df[tl_order_idx, ]
+sig_idx <- fig3c_tl_df[["adj.P.Val.x"]] <= 0.05
+fig3c_tl_df <- head(fig3c_tl_df[sig_idx, ], n=25)
+fig3c_tl_df <- fig3c_tl_df[, wanted_columns]
+colnames(fig3c_tl_df) <- renamed_columns
+rownames(fig3c_tl_df) <- fig3c_tl_df[["ID"]]
+fig3c_tl_df[["ID"]] <- NULL
+fig3c_tl_df[["m_lfcerr"]] <- fig3c_tl_df[["m_logfc"]] / fig3c_tl_df[["m_t"]]
+fig3c_tl_df[["gm_lfcerr"]] <- fig3c_tl_df[["gm_logfc"]] / fig3c_tl_df[["gm_t"]]
+
+fig3c_tl_m <- fig3c_tl_df[, c("m_logfc", "symbol", "m_lfcerr")]
+fig3c_tl_m[["type"]] <- "m"
+colnames(fig3c_tl_m) <- c("logfc", "symbol", "lfcerr", "type")
+fig3c_tl_gm <- fig3c_tl_df[, c("gm_logfc", "symbol", "gm_lfcerr")]
+fig3c_tl_gm[["type"]] <- "gm"
+colnames(fig3c_tl_gm) <- c("logfc", "symbol", "lfcerr", "type")
+melted_fig3c_tl <- rbind(fig3c_tl_m, fig3c_tl_gm)
+melted_fig3c_tl[["symbol"]] <- factor(melted_fig3c_tl[["symbol"]],
+                                      levels=fig3c_tl_m[["symbol"]])
+melted_fig3c_tl[["type"]] <- factor(melted_fig3c_tl[["type"]],
+                                    levels=c("m", "gm"))
+
+p <- ggplot(data=melted_fig3c_tl, aes(x=symbol, y=logfc, fill=type)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_fill_manual(values=c("cornflowerblue", "darkgrey")) +
+  geom_errorbar(aes(ymin=logfc - (lfcerr / 2), ymax=logfc + (lfcerr / 2)), width=.2,
+                position=position_dodge(0.9)) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+
+sig_idx <- GM_PG.M_PG.topTab[["Symbol"]] %in% fig3c_tl_gm[["symbol"]]
+sig_values <- GM_PG.M_PG.topTab[sig_idx, c("Symbol", "P.Value", "adj.P.Val")]
+rownames(sig_values) <- sig_values[["Symbol"]]
+sig_values[levels(melted_fig3c_tl[["symbol"]]), ]
+```
+
+### Figure 3C bottom-left
+
+```{r fig3C_bottomleft}
+bl_order_idx <- order(fig3c_lp_df[["logFC.x"]], decreasing=FALSE)
+fig3c_bl_df <- fig3c_lp_df[bl_order_idx, ]
+sig_idx <- fig3c_bl_df[["adj.P.Val.x"]] <= 0.05
+fig3c_bl_df <- head(fig3c_bl_df[sig_idx, ], n=20)
+fig3c_bl_df <- fig3c_bl_df[, wanted_columns]
+colnames(fig3c_bl_df) <- renamed_columns
+fig3c_bl_df[["ID"]] <- NULL
+fig3c_bl_df[["m_lfcerr"]] <- fig3c_bl_df[["m_logfc"]] / fig3c_bl_df[["m_t"]]
+fig3c_bl_df[["gm_lfcerr"]] <- fig3c_bl_df[["gm_logfc"]] / fig3c_bl_df[["gm_t"]]
+
+fig3c_bl_m <- fig3c_bl_df[, c("m_logfc", "symbol", "m_lfcerr")]
+fig3c_bl_m[["type"]] <- "m"
+colnames(fig3c_bl_m) <- c("logfc", "symbol", "lfcerr", "type")
+fig3c_bl_gm <- fig3c_bl_df[, c("gm_logfc", "symbol", "gm_lfcerr")]
+fig3c_bl_gm[["type"]] <- "gm"
+colnames(fig3c_bl_gm) <- c("logfc", "symbol", "lfcerr", "type")
+melted_fig3c_bl <- rbind(fig3c_bl_m, fig3c_bl_gm)
+melted_fig3c_bl[["symbol"]] <- factor(melted_fig3c_bl[["symbol"]],
+                                      levels=fig3c_bl_m[["symbol"]])
+melted_fig3c_bl[["type"]] <- factor(melted_fig3c_bl[["type"]],
+                                    levels=c("m", "gm"))
+
+p <- ggplot(data=melted_fig3c_bl, aes(x=symbol, y=logfc, fill=type)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_fill_manual(values=c("cornflowerblue", "darkgrey")) +
+  geom_errorbar(aes(ymin=logfc-lfcerr, ymax=logfc+lfcerr), width=.2,
+                position=position_dodge(0.9)) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+
+sig_idx <- GM_PG.M_PG.topTab[["Symbol"]] %in% fig3c_bl_gm[["symbol"]]
+sig_values <- GM_PG.M_PG.topTab[sig_idx, c("Symbol", "P.Value", "adj.P.Val")]
+rownames(sig_values) <- sig_values[["Symbol"]]
+sig_values[levels(melted_fig3c_bl[["symbol"]]), ]
+```
+
+### Figure 3C top-right
+
+The right side of the plot is LA rather than LP, otherwise this is the same.
+
+```{r fig3c_topright}
+wanted_columns <- c("ID", "logFC.x", "logFC.y", "t.x", "t.y", "Symbol")
+renamed_columns <- c("ID", "m_logfc", "gm_logfc", "m_t", "gm_t", "symbol")
+
+fig3c_la_df <- merge(M_LPS.M_LA.topTab, GM_LPS.GM_LA.topTab, by="ID")
+desc <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "description", "gene_biotype"),
+              filters="ensembl_gene_id", values=fig3c_la_df[["ID"]], mart=ensembl)
+colnames(desc) <- c("ID", "Symbol", "Description", "Type")
+fig3c_la_df <- merge(fig3c_la_df, desc, by="ID", all.x=TRUE)
+
+tr_order_idx <- order(fig3c_la_df[["logFC.x"]], decreasing=TRUE)
+fig3c_tr_df <- fig3c_la_df[tr_order_idx, ]
+sig_idx <- fig3c_tr_df[["adj.P.Val.x"]] <= 0.05
+fig3c_tr_df <- head(fig3c_tr_df[sig_idx, ], n=25)
+fig3c_tr_df <- fig3c_tr_df[, wanted_columns]
+colnames(fig3c_tr_df) <- renamed_columns
+rownames(fig3c_tr_df) <- fig3c_tr_df[["ID"]]
+fig3c_tr_df[["ID"]] <- NULL
+fig3c_tr_df[["m_lfcerr"]] <- fig3c_tr_df[["m_logfc"]] / fig3c_tr_df[["m_t"]]
+fig3c_tr_df[["gm_lfcerr"]] <- fig3c_tr_df[["gm_logfc"]] / fig3c_tr_df[["gm_t"]]
+
+fig3c_tr_m <- fig3c_tr_df[, c("m_logfc", "symbol", "m_lfcerr")]
+fig3c_tr_m[["type"]] <- "m"
+colnames(fig3c_tr_m) <- c("logfc", "symbol", "lfcerr", "type")
+fig3c_tr_gm <- fig3c_tr_df[, c("gm_logfc", "symbol", "gm_lfcerr")]
+fig3c_tr_gm[["type"]] <- "gm"
+colnames(fig3c_tr_gm) <- c("logfc", "symbol", "lfcerr", "type")
+melted_fig3c_tr <- rbind(fig3c_tr_m, fig3c_tr_gm)
+melted_fig3c_tr[["symbol"]] <- factor(melted_fig3c_tr[["symbol"]],
+                                      levels=fig3c_tr_m[["symbol"]])
+melted_fig3c_tr[["type"]] <- factor(melted_fig3c_tr[["type"]],
+                                    levels=c("m", "gm"))
+
+p <- ggplot(data=melted_fig3c_tr, aes(x=symbol, y=logfc, fill=type)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_fill_manual(values=c("cornflowerblue", "darkgrey")) +
+  geom_errorbar(aes(ymin=logfc-lfcerr, ymax=logfc+lfcerr), width=.2,
+                position=position_dodge(0.9)) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+
+sig_idx <- GM_LA.M_LA.topTab[["Symbol"]] %in% fig3c_tr_gm[["symbol"]]
+sig_values <- GM_LA.M_LA.topTab[sig_idx, c("Symbol", "P.Value", "adj.P.Val")]
+rownames(sig_values) <- sig_values[["Symbol"]]
+sig_values[levels(melted_fig3c_tr[["symbol"]]), ]
+```
+
+### Figure 3C bottom-right
+
+```{r fig3C_bottomright}
+br_order_idx <- order(fig3c_la_df[["logFC.x"]], decreasing=FALSE)
+fig3c_br_df <- fig3c_la_df[br_order_idx, ]
+sig_idx <- fig3c_br_df[["adj.P.Val.x"]] <= 0.05
+fig3c_br_df <- head(fig3c_br_df[sig_idx, ], n=20)
+fig3c_br_df <- fig3c_br_df[, wanted_columns]
+colnames(fig3c_br_df) <- renamed_columns
+fig3c_br_df[["ID"]] <- NULL
+fig3c_br_df[["m_lfcerr"]] <- fig3c_br_df[["m_logfc"]] / fig3c_br_df[["m_t"]]
+fig3c_br_df[["gm_lfcerr"]] <- fig3c_br_df[["gm_logfc"]] / fig3c_br_df[["gm_t"]]
+
+fig3c_br_m <- fig3c_br_df[, c("m_logfc", "symbol", "m_lfcerr")]
+fig3c_br_m[["type"]] <- "m"
+colnames(fig3c_br_m) <- c("logfc", "symbol", "lfcerr", "type")
+fig3c_br_gm <- fig3c_br_df[, c("gm_logfc", "symbol", "gm_lfcerr")]
+fig3c_br_gm[["type"]] <- "gm"
+colnames(fig3c_br_gm) <- c("logfc", "symbol", "lfcerr", "type")
+melted_fig3c_br <- rbind(fig3c_br_m, fig3c_br_gm)
+melted_fig3c_br[["symbol"]] <- factor(melted_fig3c_br[["symbol"]],
+                                      levels=fig3c_br_m[["symbol"]])
+melted_fig3c_br[["type"]] <- factor(melted_fig3c_br[["type"]],
+                                    levels=c("m", "gm"))
+
+p <- ggplot(data=melted_fig3c_br, aes(x=symbol, y=logfc, fill=type)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_fill_manual(values=c("cornflowerblue", "darkgrey")) +
+  geom_errorbar(aes(ymin=logfc-lfcerr, ymax=logfc+lfcerr), width=.2,
+                position=position_dodge(0.9)) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+
+sig_idx <- GM_LA.M_LA.topTab[["Symbol"]] %in% fig3c_br_gm[["symbol"]]
+sig_values <- GM_LA.M_LA.topTab[sig_idx, c("Symbol", "P.Value", "adj.P.Val")]
+rownames(sig_values) <- sig_values[["Symbol"]]
+sig_values[levels(melted_fig3c_br[["symbol"]]), ]
+```
+
+### Figure 2A
+
+Kajal responded to my query about this figure, and I am a little embarrassed to
+say that I should have seen what it is.  It seems to me that it is a bit
+redundant though with 3c, as it is precisely a subset of that data, though
+slightly reordered.
+
+#### Figure 2A Left
+
+```{r fig2a1}
+fig2a_df <- M_LPS.M_LP.sigGenes
+order_idx <- order(fig2a_df[["logFC"]], decreasing=FALSE)
+fig2a_df <- fig2a_df[order_idx, ]
+top <- head(fig2a_df, n=10)
+bot <- tail(fig2a_df, n=10)
+plotted <- rbind(top, bot)
+rownames(plotted) <- plotted[["ID"]]
+desc_idx <- desc[["ID"]] %in% plotted[["ID"]]
+this_desc <- desc[desc_idx, ]
+current <- rownames(plotted)
+plotted <- merge(this_desc, plotted, by.x="ID", by.y="ID", all=TRUE)
+rownames(plotted) <- make.names(plotted[["ID"]], unique=TRUE)
+plotted <- plotted[current, ]
+plotted[["lfcerr"]] <- plotted[["logFC"]] / plotted[["t"]]
+plotted[["Symbol"]] <- factor(plotted[["Symbol"]], levels=plotted[["Symbol"]])
+
+p <- ggplot(data=plotted, aes(x=Symbol, y=logFC)) +
+  geom_bar(stat="identity", fill="#89A8DD", color="black", position=position_dodge())+
+  geom_errorbar(aes(ymin=logFC - (lfcerr / 2), ymax=logFC + (lfcerr / 2)), width=0.2,
+                position=position_dodge(0.9)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+```
+
+#### Figure 2A Right
+
+```{r fig2a}
+fig2a_df <- M_LPS.M_LA.sigGenes
+order_idx <- order(fig2a_df[["logFC"]], decreasing=FALSE)
+fig2a_df <- fig2a_df[order_idx, ]
+top <- head(fig2a_df, n=10)
+bot <- tail(fig2a_df, n=10)
+plotted <- rbind(top, bot)
+rownames(plotted) <- plotted[["ID"]]
+desc_idx <- desc[["ID"]] %in% plotted[["ID"]]
+this_desc <- desc[desc_idx, ]
+current <- rownames(plotted)
+plotted <- merge(this_desc, plotted, by.x="ID", by.y="ID", all=TRUE)
+rownames(plotted) <- make.names(plotted[["ID"]], unique=TRUE)
+plotted <- plotted[current, ]
+plotted[["lfcerr"]] <- plotted[["logFC"]] / plotted[["t"]]
+plotted[["Symbol"]] <- factor(plotted[["Symbol"]], levels=plotted[["Symbol"]])
+
+p <- ggplot(data=plotted, aes(x=Symbol, y=logFC)) +
+  geom_bar(stat="identity", fill="#7BD19C", color="black", position=position_dodge())+
+  geom_errorbar(aes(ymin=logFC - (lfcerr / 2), ymax=logFC + (lfcerr / 2)), width=0.2,
+                position=position_dodge(0.9)) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+```
+
+### Figure 2D
+
+I created a table of shared DEG between L+PGE2/LPS and L+Ado/LPS (table attached
+below) by merging the 2 DE tables based on common gene symbol.  In this table,
+logFC.x corresponds to L+Ado/LPS and logFC.y corresponds to L+PGE2/LPS.  I
+averaged the fold changes between logFC.x and logFC.y in order to determine the
+rank order of the genes in the figure but plotted the fold changes
+individually.  Instead of plotting log2FC I manually converted those values to
+just FC. I don’t know how to calculate standard error if I am plotting just FC.
+It would be nice if this could all be done in R.
+
+```{r fig2dt}
+fig2d_df <- merge(M_LPS.M_LP.sigGenes, M_LPS.M_LA.sigGenes, by="ID")
+fig2d_df <- merge(fig2d_df, desc, by="ID")
+fig2d_df[["avg"]] <- (fig2d_df[["logFC.x"]] + fig2d_df[["logFC.y"]]) / 2
+
+order_idx <- order(fig2d_df[["avg"]], decreasing=TRUE)
+fig2dt_df <- head(fig2d_df[order_idx, ], n=22)
+fig2dt_df[["lp_lfcerr"]] <- fig2dt_df[["logFC.x"]] / fig2dt_df[["t.x"]]
+fig2dt_df[["la_lfcerr"]] <- fig2dt_df[["logFC.y"]] / fig2dt_df[["t.y"]]
+
+fig2dt_lp <- fig2dt_df[, c("Symbol", "logFC.x", "lp_lfcerr")]
+colnames(fig2dt_lp) <- c("symbol", "logfc", "lfcerr")
+fig2dt_lp[["type"]] <- "LPS+PGE"
+fig2dt_la <- fig2dt_df[, c("Symbol", "logFC.y", "la_lfcerr")]
+colnames(fig2dt_la) <- c("symbol", "logfc", "lfcerr")
+fig2dt_la[["type"]] <- "LPS+Ado"
+melted_fig2dt <- rbind(fig2dt_la, fig2dt_lp)
+melted_fig2dt[["symbol"]] <- factor(melted_fig2dt[["symbol"]],
+                                    levels=unique(melted_fig2dt[["symbol"]]))
+melted_fig2dt[["type"]] <- factor(melted_fig2dt[["type"]], levels=c("LPS+Ado", "LPS+PGE"))
+
+p <- ggplot(data=melted_fig2dt, aes(x=symbol, y=logfc, fill=type)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_fill_manual(values=c("#7BD19C", "#89A8DD")) +
+  geom_errorbar(aes(ymin=logfc - (lfcerr / 2), ymax=logfc + (lfcerr / 2)), width=0.2,
+                position=position_dodge(0.9)) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+```
+
+```{r fig2db}
+fig2d_df <- merge(M_LPS.M_LP.sigGenes, M_LPS.M_LA.sigGenes, by="ID")
+fig2d_df <- merge(fig2d_df, desc, by="ID")
+fig2d_df[["avg"]] <- (fig2d_df[["logFC.x"]] + fig2d_df[["logFC.y"]]) / 2
+
+order_idx <- order(fig2d_df[["avg"]], decreasing=FALSE)
+fig2db_df <- head(fig2d_df[order_idx, ], n=22)
+fig2db_df[["lp_lfcerr"]] <- fig2db_df[["logFC.x"]] / fig2db_df[["t.x"]]
+fig2db_df[["la_lfcerr"]] <- fig2db_df[["logFC.y"]] / fig2db_df[["t.y"]]
+
+fig2db_lp <- fig2db_df[, c("Symbol", "logFC.x", "lp_lfcerr")]
+colnames(fig2db_lp) <- c("symbol", "logfc", "lfcerr")
+fig2db_lp[["type"]] <- "LPS+PGE"
+fig2db_la <- fig2db_df[, c("Symbol", "logFC.y", "la_lfcerr")]
+colnames(fig2db_la) <- c("symbol", "logfc", "lfcerr")
+fig2db_la[["type"]] <- "LPS+Ado"
+melted_fig2db <- rbind(fig2db_la, fig2db_lp)
+melted_fig2db[["symbol"]] <- factor(melted_fig2db[["symbol"]],
+                                    levels=unique(melted_fig2db[["symbol"]]))
+melted_fig2db[["type"]] <- factor(melted_fig2db[["type"]], levels=c("LPS+Ado", "LPS+PGE"))
+
+p <- ggplot(data=melted_fig2db, aes(x=symbol, y=logfc, fill=type)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  scale_fill_manual(values=c("#7BD19C", "#89A8DD")) +
+  geom_errorbar(aes(ymin=logfc - (lfcerr / 2), ymax=logfc + (lfcerr / 2)), width=0.2,
+                position=position_dodge(0.9)) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.5))
+p
+```
+
+## Venn Diagram of shared DEG between M-CSF LPS v LA v LP
+
+Upregulated genes compared to NS
+
+```{r}
+v_data <- list(DEG_LA4[DEG_LA4$logFC > 0, ]$ID,
+               DEG_LP4[DEG_LP4$logFC > 0, ]$ID,
+               DEG_LPS[DEG_LPS$logFC > 0, ]$ID)
+v_data <- Venn(v_data, SetNames=c("LPS+Ado", "LPS+PGE2", "LPS"), numberOfSets=3)
+Vennerable::plot(v_data, doWeights=FALSE)
+## dev.copy(png, "VennDiagram Upregulated LPS LA LP", width=700, height=700)
+## dev.off();
+```
+
+Downregulated genes compared to NS
+
+```{r}
+v_data <- list(DEG_LA4[DEG_LA4$logFC < 0, ]$ID,
+               DEG_LP4[DEG_LP4$logFC < 0, ]$ID,
+               DEG_LPS[DEG_LPS$logFC < 0, ]$ID)
+v_data <- Venn(v_data, SetNames=c("LPS+Ado", "LPS+PGE2", "LPS"), numberOfSets=3)
+Vennerable::plot(v_data, doWeights=FALSE)
+## dev.copy(png, "VennDiagram Downregulated LPS LA LP", width=700, height=700)
+## dev.off();
+```
+
+## Volcano Plots
+
+M_LPS v M_LA
+
+```{r previous_volcano}
+res <- read.csv(lps_la_table)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20,
+               main="Volcano plot M_LPS v M_LA", xlim=c(-7, 7)))
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val < 0.05 ),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="violetred2"))
+with(subset(res, abs(logFC) > 1),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="orange"))
+with(subset(res, adj.P.Val < 0.05 & abs(logFC) > 1),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="turquoise3"))
+dev.copy(png, "images/VolcanoPlot_M_LPS_v_M_LA.png", width=700, height=700)
+dev.off()
+```
+
+```{r print_numbers_downla}
+sig_up_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] > 1
+sum(sig_up_idx)
+sig_up_ids <- res[sig_up_idx, "ID"]
+m_lps_m_la_up_ids <- sig_up_ids
+
+sig_down_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] < -1
+sum(sig_down_idx)
+sig_down_ids <- res[sig_down_idx, "ID"]
+m_lps_m_la_down_ids <- sig_down_ids
+```
+
+# M_LPS v M_LP
+
+```{r uneval_volcano}
+res <- read.csv("csv/topTab_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv", header=TRUE)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20,
+               main="Volcano plot M_LPS v M_LP", xlim=c(-7, 7)))
+
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val < 0.05 ),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="violetred2"))
+with(subset(res, abs(logFC) > 1),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="orange"))
+with(subset(res, adj.P.Val < 0.05 & abs(logFC) > 1),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="turquoise3"))
+dev.copy(png, "images/VolcanoPlot_M_LPS_v_M_LP.png", width=700, height=700)
+dev.off()
+```
+
+## Rich Factor Graphs
+
+## GO terms shared LA LP
+
+```{r}
+GOSharedpathways <- read.table("csv/GO MF FDR .05 TOP 5 only-2.txt", header=TRUE, sep='\t')
+GOSharedpathways <- GOSharedpathways[order(GOSharedpathways$p.Value, decreasing=TRUE), ]
+
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 18, 3, 8))
+plot(GOSharedpathways$Rich.Factor, c(1:5), axes=FALSE,
+     panel.first=abline(h=1:5, v=seq(0.1, 0.6, 0.1), col="grey90"),
+     cex=as.numeric(GOSharedpathways$Gene.Number) / 4,
+     col=colorRamp[cut(as.numeric(GOSharedpathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.04))
+axis(side=2, at=1:5, labels=as.character(GOSharedpathways$GeneSet), las=2, cex.axis=0.5)
+axis(side=1, tick=GOSharedpathways[["Rich.Factor"]])
+```
+
+### KEGG LA
+
+```{r, eval=FALSE}
+LApathways <- read.table("csv/Cytoscape Pathways/LA v LPS.txt", header=TRUE, sep='\t')
+LApathways <- LApathways[order(LApathways$p.Value, decreasing=TRUE), ]
+## plot x v. y, change size, assign color to p-value
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 18, 3, 8))
+plot(LApathways$Rich.Factor, c(1:28), axes=FALSE,
+     panel.first=abline(h=1:28, v=seq(0.1, 0.4, 0.1), col="grey90"),
+     cex=as.numeric(LApathways$Gene.Number) / 10,
+     col=colorRamp[cut(as.numeric(LApathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.4))
+axis(side=2, at=1:28, labels=as.character(LApathways$Pathway), las=2, cex.axis=0.8)
+axis(side=1, tick=LApathways$Rich.Factor, pos=0.4)
+```
+
+### GO LA
+
+```{r, eval=FALSE}
+GOLApathways <- read.table("csv/Cytoscape Pathways/GO BP LA whole network.txt",
+                           header=TRUE, sep='\t')
+GOLApathways <- GOLApathways[order(GOLApathways$p.Value, decreasing=TRUE), ]
+##plot x v. y, change size, assign color to p-value
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 20, 3, 8))
+plot(GOLApathways$Rich.Factor, c(1:57), axes=F,
+     panel.first=abline(h=1:57, v=seq(0.1, 0.5, 0.1), col="grey90"),
+     cex=as.numeric(GOLApathways$Gene.Number) / 10,
+     col=colorRamp[cut(as.numeric(GOLApathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.5))
+axis(side=2,at=1:57, labels=as.character(GOLApathways$Pathway), las=2, cex.axis=0.8)
+axis(side=1, tick=GOLApathways$Rich.Factor, pos=0.4)
+```
+
+### GO LP
+
+```{r, eval=FALSE}
+GOLPpathways <- read.table("csv/Cytoscape Pathways/GO_BP_LPvLPS.txt", header=TRUE, sep="\t")
+GOLPpathways <- GOLPpathways[order(GOLPpathways$p.Value, decreasing=TRUE), ]
+
+colorRamp <- colorRampPalette(c("turquoise1", "mediumblue"))(50)
+par(mar=c(5, 18, 3, 8))
+plot(GOLPpathways$Rich.Factor, c(1:35), axes=FALSE,
+     panel.first=abline(h=1:35, v=seq(0.1, 0.6, 0.1), col="grey90"),
+     cex=as.numeric(GOLPpathways$Gene.Number) / 20,
+     col=colorRamp[cut(as.numeric(GOLPpathways$p.Value), breaks=50)],
+     pch=20, ylab=" ", xlab="Rich Factor", main="Pathways Enriched",
+     xlim=c(0, 0.6))
+axis(side=2, at=1:35, labels=as.character(GOLPpathways$Pathway), las=2, cex.axis=0.5)
+axis(side=1, tick=GOLPpathways$Rich.Factor, pos=0.4)
+```
+
+# Volcano plot M_LPS_4 v M_LP_4
+
+## Figure 3B top-left
+
+```{r first_volcano}
+res <- read.csv("csv/topTab_M_LPSvM_LP_CDS_limmabatchcorrection_20171120rev.csv",
+                header=TRUE)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8,
+               pch=20, main="Volcano plot M_LPS v M_LP", xlim=c(-7, 7)))
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val < 0.05 ), points(logFC, -log10(P.Value), cex=0.8,
+                                            pch=20, col="violetred2"))
+with(subset(res, abs(logFC) > 1), points(logFC, -log10(P.Value), cex=0.8,
+                                         pch=20, col="orange"))
+with(subset(res, adj.P.Val < 0.05 & abs(logFC) > 1),
+     points(logFC, -log10(P.Value),
+            cex=0.8, pch=20, col="turquoise3"))
+dev.copy(png, "images/VolcanoPlot_M_LPS_vs_M_LP.png", width=700, height=700)
+dev.off()
+```
+
+### The number of up significant genes
+
+```{r print_numbers_up1}
+sig_up_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] > 1
+sum(sig_up_idx)
+sig_up_ids <- res[sig_up_idx, "ID"]
+head(sig_up_ids)
+m_lps_m_lp_up_ids <- sig_up_ids
+```
+
+### The number of down significant genes
+
+```{r print_numbers_down1}
+sig_down_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] < -1
+sum(sig_down_idx)
+sig_down_ids <- res[sig_down_idx, "ID"]
+head(sig_down_ids)
+m_lps_m_lp_down_ids <- sig_down_ids
+```
+
+# Volcano plot M_LPS_4 v M_LA_4
+
+## Figure 3B top-right
+
+```{r second_volcano}
+res <- read.csv(lps_la_table)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20,
+               main="Volcano plot M_LPS v M_LA", xlim=c(-7, 7)))
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val < 0.05 ), points(logFC, -log10(P.Value), cex=0.8,
+                                            pch=20, col="violetred2"))
+with(subset(res, abs(logFC) > 1), points(logFC, -log10(P.Value), cex=0.8,
+                                         pch=20, col="orange"))
+with(subset(res, adj.P.Val<.05 & abs(logFC) > 1),
+     points(logFC, -log10(P.Value),
+            cex=0.8, pch=20, col="turquoise3"))
+dev.copy(png, "images/VolcanoPlot_M_LPS_v_M_LA.png", width=700, height=700)
+dev.off()
+```
+
+### The number of up significant genes
+
+```{r print_numbers_up2}
+sig_up_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] > 1
+sum(sig_up_idx)
+sig_up_ids <- res[sig_up_idx, "ID"]
+head(sig_up_ids)
+m_lps_m_la_sig_ids <- sig_up_ids
+```
+
+### The number of down significant genes
+
+```{r print_numbers_down2}
+sig_down_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] < -1
+sum(sig_down_idx)
+sig_down_ids <- res[sig_down_idx, "ID"]
+head(sig_down_ids)
+```
+
+# Volcano plot GM_LPS_4 v GM_LA_4
+
+## Figure 3B bottom-right
+
+```{r third_volcano}
+res <- read.csv(gm_lps_la_table)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20,
+               main="Volcano plot GM_LPS_4 v GM_LA_4", xlim=c(-7, 7)))
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val < 0.05), points(logFC, -log10(P.Value), cex=0.8,
+                                           pch=20, col="violetred2"))
+with(subset(res, abs(logFC) > 1), points(logFC, -log10(P.Value), cex=0.8,
+                                         pch=20, col="orange"))
+with(subset(res, adj.P.Val < 0.05 & abs(logFC) > 1),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="turquoise3"))
+dev.copy(png, "images/VolcanoPlot GM_LPS v GM_LA", width=700, height=700)
+dev.off()
+```
+
+### The number of up significant genes
+
+```{r print_numbers_up3}
+sig_up_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] > 1
+sum(sig_up_idx)
+sig_up_ids <- res[sig_up_idx, "ID"]
+head(sig_up_ids)
+```
+
+### The number of down significant genes
+
+```{r print_numbers_down3}
+sig_down_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] < -1
+sum(sig_down_idx)
+sig_down_ids <- res[sig_down_idx, "ID"]
+head(sig_down_ids)
+```
+
+# Volcano plot GM_LPS_4 v GM_LP_4
+
+## Figure 3B bottom-left
+
+So, it appears I get the inverse of what is in the figure.  Did the contrast get reversed?
+
+I went back to the section which defines this, it has the heading
+'GM_LPS_v_GM_LP' and the contrast appears to me to be correct.  At least it is
+written like this:
+
+<code>
+GM_LPS.GM_LP.contr.mat <- makeContrasts(GM_LPSvGM_LP=((condGM_LPS-condGM_NS)-(condGM_LP-condGM_NS)),
+levels=v$design)
+</code>
+
+My inclination is therefore that this got flipped?
+
+```{r fourth_volcano}
+res <- read.csv(gm_lps_lp_table)
+head(res)
+with(res, plot(logFC, -log10(P.Value), cex=0.8, pch=20,
+               main="Volcano plot GM_LPS v GM_LP", xlim=c(-7, 7)))
+## Add colored points: red if padj<0.05, orange of log2FC>1, green if both)
+with(subset(res, adj.P.Val < 0.05 ), points(logFC, -log10(P.Value), cex=0.8,
+                                            pch=20, col="violetred2"))
+with(subset(res, abs(logFC) > 1), points(logFC, -log10(P.Value), cex=0.8,
+                                         pch=20, col="orange"))
+with(subset(res, adj.P.Val < 0.05 & abs(logFC) > 1),
+     points(logFC, -log10(P.Value), cex=0.8, pch=20, col="turquoise3"))
+dev.copy(png, "images/VolcanoPlot GM_LPS v GM_LP", width=700, height=700)
+dev.off()
+```
+
+### The number of up significant genes
+
+```{r print_numbers_up4}
+sig_up_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] > 1
+sum(sig_up_idx)
+sig_up_ids <- res[sig_up_idx, "ID"]
+head(sig_up_ids)
+```
+
+### The number of down significant genes
+
+```{r print_numbers_down4}
+sig_down_idx <- res[, "adj.P.Val"] < 0.05 & res[, "logFC"] < -1
+sum(sig_down_idx)
+sig_down_ids <- res[sig_down_idx, "ID"]
+head(sig_down_ids)
+```
+
+### Figure 2B
+
+I think the code I used for the venn diagrams is in the Rmarkdown file towards
+the end.  However, I have 2 files saved for the venn diagrams that are different
+from what I have in figure 2B.  I think I need to swap the current 2B with the
+venn diagrams I have attached below because the numbers here match with the
+volcano plots.  Are these the numbers you are getting also?
+
+#### Attempt 1
+
+This is just pulling the M LP/LPS LA/LPS significant genes.
+This appears to not be the answer.
+
+```{r fig2b}
+lps_pge_sig <- M_LPS.M_LP.sigGenes
+up_idx <- lps_pge_sig[["logFC"]] > 0
+down_idx <- lps_pge_sig[["logFC"]] < 0
+lps_pge_up_ids <- lps_pge_sig[up_idx, "ID"]
+lps_pge_down_ids <- lps_pge_sig[down_idx, "ID"]
+lps_a_sig <- M_LPS.M_LA.sigGenes
+up_idx <- lps_a_sig[["logFC"]] > 0
+down_idx <- lps_a_sig[["logFC"]] < 0
+lps_a_up_ids <- lps_a_sig[up_idx, "ID"]
+lps_a_down_ids <- lps_a_sig[down_idx, "ID"]
+
+v_data <- list(lps_pge_up_ids, lps_a_up_ids)
+v_data <- Venn(v_data, SetNames=c("LPS+PGE2", "LPS+Ado"), numberOfSets=2)
+Vennerable::plot(v_data, doWeights=FALSE)
+
+v_data <- list(lps_pge_down_ids, lps_a_down_ids)
+v_data <- Venn(v_data, SetNames=c("LPS+PGE2", "LPS+Ado"), numberOfSets=2)
+Vennerable::plot(v_data, doWeights=FALSE)
+```
+
+#### Attempt 2
+
+Lets assume there is a hint in the text and that I should pull from the volcano
+plot numbers for M LP/LPS and M LA/LPS
+
+```{r attempt2}
+v_data <- Venn(list(m_lps_m_lp_up_ids, m_lps_m_la_up_ids),
+               SetNames=c("LPS+PGE2", "LPS+Ado"))
+Vennerable::plot(v_data)
+
+v_data <- Venn(list(m_lps_m_lp_down_ids, m_lps_m_la_down_ids),
+               SetNames=c("LPS+PGE2", "LPS+Ado"))
+Vennerable::plot(v_data)
+```
+
+#### Correlation of logFCs for LP/LPS and LA/LPS
+
+One request in our conversation was to have a calculation of the correlation
+coefficient between the LP/LPS and LA/LPS comparisons.
+
+```{r lpla_cor}
+m_cor_table <- merge(M_LPS.M_LP.topTab, M_LPS.M_LA.topTab, by="ID")
+cor.test(x=m_cor_table[["logFC.x"]], y=m_cor_table[["logFC.y"]])
+
+gm_cor_table <- merge(GM_LPS.GM_LP.topTab, GM_LPS.GM_LA.topTab, by="ID")
+cor.test(x=gm_cor_table[["logFC.x"]], y=gm_cor_table[["logFC.y"]])
+
+m_scatter <- plot_linear_scatter(m_cor_table[, c("logFC.x", "logFC.y")])
+m_scatter$scatter
+
+gm_scatter <- plot_linear_scatter(gm_cor_table[, c("logFC.x", "logFC.y")])
+gm_scatter$scatter
+```
+
+```{r saveme}
+pander::pander(sessionInfo())
+message(paste0("This is hpgltools commit: ", get_git_commit()))
+
+##this_save <- paste0(gsub(pattern="\\.Rmd", replace="", x=rmd_file), "-v", ver, ".rda.xz")
+##message(paste0("Saving to ", this_save))
+##tmp <- sm(saveme(filename=this_save))
+```
